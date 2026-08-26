@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/theoutdoorprogrammer/trailwire/internal/config"
+	"github.com/theoutdoorprogrammer/trailwire/internal/mcpserver"
 	"github.com/theoutdoorprogrammer/trailwire/internal/session"
 	"github.com/theoutdoorprogrammer/trailwire/internal/store"
 	"github.com/urfave/cli/v3"
@@ -30,6 +31,7 @@ func main() {
 			&cli.StringFlag{Name: "harness", Value: "human", Usage: "sender identity to use"},
 		},
 		Commands: []*cli.Command{
+			mcpCommand(),
 			sendCommand(),
 			messageCommand(),
 			announceCommand(),
@@ -52,6 +54,21 @@ func main() {
 	if err := command.Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "trailwire:", err)
 		os.Exit(1)
+	}
+}
+
+func mcpCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "mcp",
+		Usage: "Run the Trailwire stdio MCP server",
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			s, err := openSession(ctx, cmd, false)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			return mcpserver.New(s, version).Run(ctx)
+		},
 	}
 }
 
