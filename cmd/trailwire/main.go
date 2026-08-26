@@ -11,6 +11,7 @@ import (
 
 	"github.com/theoutdoorprogrammer/trailwire/internal/config"
 	trailwirehook "github.com/theoutdoorprogrammer/trailwire/internal/hook"
+	"github.com/theoutdoorprogrammer/trailwire/internal/installer"
 	"github.com/theoutdoorprogrammer/trailwire/internal/mcpserver"
 	"github.com/theoutdoorprogrammer/trailwire/internal/session"
 	"github.com/theoutdoorprogrammer/trailwire/internal/store"
@@ -32,6 +33,7 @@ func main() {
 			&cli.StringFlag{Name: "harness", Value: "human", Usage: "sender identity to use"},
 		},
 		Commands: []*cli.Command{
+			initCommand(),
 			hookCommand(),
 			mcpCommand(),
 			sendCommand(),
@@ -56,6 +58,32 @@ func main() {
 	if err := command.Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "trailwire:", err)
 		os.Exit(1)
+	}
+}
+
+func initCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "init",
+		Usage: "Configure Claude Code, Codex, and Cursor",
+		Flags: []cli.Flag{&cli.BoolFlag{Name: "dry-run", Usage: "show which files would change without writing"}},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			result, err := installer.Install(installer.Options{
+				ConfigPath: cmd.String("config"), DryRun: cmd.Bool("dry-run"),
+			})
+			if err != nil {
+				return err
+			}
+			for _, file := range result.Files {
+				status := "unchanged"
+				if file.Changed && cmd.Bool("dry-run") {
+					status = "would update"
+				} else if file.Changed {
+					status = "updated"
+				}
+				fmt.Fprintf(cmd.Writer, "%s: %s\n", status, file.Path)
+			}
+			return nil
+		},
 	}
 }
 
