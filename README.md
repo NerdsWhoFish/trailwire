@@ -85,7 +85,7 @@ Message TTL is global and human-owned. Agents cannot set a per-message TTL.
 trailwire config retention 72h
 ```
 
-The default is seven days. Trailwire accepts values from one hour through 30 days. Every CLI command, hook invocation, and MCP tool call opportunistically removes expired messages and work intents.
+The default is seven days. Trailwire accepts values from one hour through 30 days. Every hook invocation, database-backed CLI command, and MCP tool call opportunistically removes expired messages and work intents.
 
 ## Storage and identity
 
