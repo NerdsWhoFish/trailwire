@@ -15,7 +15,10 @@ import (
 	"github.com/theoutdoorprogrammer/trailwire/internal/mcpserver"
 	"github.com/theoutdoorprogrammer/trailwire/internal/session"
 	"github.com/theoutdoorprogrammer/trailwire/internal/store"
+	"github.com/theoutdoorprogrammer/trailwire/internal/telemetry"
 	"github.com/urfave/cli/v3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 var (
@@ -24,6 +27,22 @@ var (
 )
 
 func main() {
+	ctx := context.Background()
+	shutdown, err := telemetry.Setup(ctx, version)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "trailwire:", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(shutdownContext); err != nil {
+			fmt.Fprintln(os.Stderr, "trailwire: shut down telemetry:", err)
+		}
+	}()
+	ctx, span := otel.Tracer("github.com/theoutdoorprogrammer/trailwire").Start(ctx, "trailwire.run")
+	defer span.End()
+
 	command := &cli.Command{
 		Name:    "trailwire",
 		Usage:   "Local coordination for AI coding agents",
@@ -55,7 +74,9 @@ func main() {
 			},
 		},
 	}
-	if err := command.Run(context.Background(), os.Args); err != nil {
+	if err := command.Run(ctx, os.Args); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "command failed")
 		fmt.Fprintln(os.Stderr, "trailwire:", err)
 		os.Exit(1)
 	}
