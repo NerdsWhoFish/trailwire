@@ -28,7 +28,9 @@ type Agent struct {
 }
 
 type Message struct {
+	EventID    int64
 	ID         int64
+	EventKind  string
 	SenderID   string
 	SenderName string
 	TargetKind string
@@ -52,6 +54,11 @@ type SendRequest struct {
 	TargetKind string
 	TargetID   string
 	Body       string
+}
+
+type CleanupResult struct {
+	Messages int64
+	Intents  int64
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -115,18 +122,34 @@ CREATE TABLE IF NOT EXISTS messages (
   sender_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   target_kind TEXT NOT NULL CHECK (target_kind IN ('repo', 'channel', 'agent')),
   target_id TEXT NOT NULL,
-  body TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+	body TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	recanted_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at);
 
-CREATE TABLE IF NOT EXISTS inbox (
+CREATE TABLE IF NOT EXISTS message_recipients (
   message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-  claimed_at INTEGER,
-  PRIMARY KEY (message_id, agent_id)
+	agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	PRIMARY KEY (message_id, agent_id)
 );
-CREATE INDEX IF NOT EXISTS inbox_unclaimed ON inbox(agent_id, claimed_at, message_id);
+
+CREATE TABLE IF NOT EXISTS message_events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+	kind TEXT NOT NULL CHECK (kind IN ('created', 'modified', 'recanted')),
+	body TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS message_events_message ON message_events(message_id, id);
+
+CREATE TABLE IF NOT EXISTS inbox (
+	event_id INTEGER NOT NULL REFERENCES message_events(id) ON DELETE CASCADE,
+	agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	claimed_at INTEGER,
+	PRIMARY KEY (event_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS inbox_unclaimed ON inbox(agent_id, claimed_at, event_id);
 
 CREATE TABLE IF NOT EXISTS intents (
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -225,8 +248,12 @@ func (s *Store) JoinChannel(ctx context.Context, agentID, name string) error {
 	if name == "" {
 		return errors.New("channel name is required")
 	}
-	if err := s.CreateChannel(ctx, name); err != nil {
-		return err
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channels WHERE name = ?`, name).Scan(&exists); err != nil {
+		return fmt.Errorf("find channel: %w", err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("channel %q does not exist, create or propose it first", name)
 	}
 	result, err := s.db.ExecContext(ctx, `
 INSERT INTO channel_members (channel_id, agent_id, joined_at)
@@ -244,6 +271,16 @@ WHERE cm.agent_id = ? AND c.name = ?`, agentID, name).Scan(&joined)
 		if checkErr != nil || joined == 0 {
 			return fmt.Errorf("join channel: agent %q is not registered", agentID)
 		}
+	}
+	return nil
+}
+
+func (s *Store) ProposeChannel(ctx context.Context, agentID, name string) error {
+	if err := s.CreateChannel(ctx, name); err != nil {
+		return err
+	}
+	if err := s.JoinChannel(ctx, agentID, name); err != nil {
+		return fmt.Errorf("join proposed channel: %w", err)
 	}
 	return nil
 }
@@ -302,9 +339,10 @@ func (s *Store) Send(ctx context.Context, request SendRequest) (int64, int, erro
 	}
 	defer tx.Rollback()
 
+	now := s.now().UnixMilli()
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO messages (sender_id, target_kind, target_id, body, created_at)
-VALUES (?, ?, ?, ?, ?)`, request.SenderID, request.TargetKind, request.TargetID, request.Body, s.now().UnixMilli())
+VALUES (?, ?, ?, ?, ?)`, request.SenderID, request.TargetKind, request.TargetID, request.Body, now)
 	if err != nil {
 		return 0, 0, fmt.Errorf("store message: %w", err)
 	}
@@ -332,14 +370,109 @@ VALUES (?, ?, ?, ?, ?)`, request.SenderID, request.TargetKind, request.TargetID,
 	}
 
 	for _, agentID := range recipients {
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO inbox (message_id, agent_id) VALUES (?, ?)`, messageID, agentID); err != nil {
-			return 0, 0, fmt.Errorf("enqueue message: %w", err)
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO message_recipients (message_id, agent_id) VALUES (?, ?)`, messageID, agentID); err != nil {
+			return 0, 0, fmt.Errorf("store message recipient: %w", err)
 		}
+	}
+	eventID, err := insertMessageEvent(ctx, tx, messageID, "created", request.Body, now)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := enqueueMessageEvent(ctx, tx, messageID, eventID); err != nil {
+		return 0, 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("commit send: %w", err)
 	}
 	return messageID, len(recipients), nil
+}
+
+func (s *Store) ModifyMessage(ctx context.Context, senderID string, messageID int64, body string) (int, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return 0, errors.New("message body is required")
+	}
+	return s.reviseMessage(ctx, senderID, messageID, "modified", body)
+}
+
+func (s *Store) RecantMessage(ctx context.Context, senderID string, messageID int64, reason string) (int, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "No reason provided"
+	}
+	return s.reviseMessage(ctx, senderID, messageID, "recanted", reason)
+}
+
+func (s *Store) reviseMessage(ctx context.Context, senderID string, messageID int64, kind, body string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin message revision: %w", err)
+	}
+	defer tx.Rollback()
+
+	var owner string
+	var recantedAt sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT sender_id, recanted_at FROM messages WHERE id = ?`, messageID).Scan(&owner, &recantedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("message %d was not found", messageID)
+		}
+		return 0, fmt.Errorf("find message: %w", err)
+	}
+	if owner != senderID {
+		return 0, errors.New("only the sender can modify or recant a message")
+	}
+	if recantedAt.Valid {
+		return 0, fmt.Errorf("message %d is already recanted", messageID)
+	}
+
+	now := s.now().UnixMilli()
+	if kind == "modified" {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET body = ? WHERE id = ?`, body, messageID); err != nil {
+			return 0, fmt.Errorf("modify message: %w", err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET recanted_at = ? WHERE id = ?`, now, messageID); err != nil {
+			return 0, fmt.Errorf("recant message: %w", err)
+		}
+	}
+	eventID, err := insertMessageEvent(ctx, tx, messageID, kind, body, now)
+	if err != nil {
+		return 0, err
+	}
+	if err := enqueueMessageEvent(ctx, tx, messageID, eventID); err != nil {
+		return 0, err
+	}
+	var recipients int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM message_recipients WHERE message_id = ?`, messageID).Scan(&recipients); err != nil {
+		return 0, fmt.Errorf("count message recipients: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit message revision: %w", err)
+	}
+	return recipients, nil
+}
+
+func insertMessageEvent(ctx context.Context, tx *sql.Tx, messageID int64, kind, body string, createdAt int64) (int64, error) {
+	result, err := tx.ExecContext(ctx, `
+INSERT INTO message_events (message_id, kind, body, created_at)
+VALUES (?, ?, ?, ?)`, messageID, kind, body, createdAt)
+	if err != nil {
+		return 0, fmt.Errorf("store message event: %w", err)
+	}
+	eventID, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("read message event id: %w", err)
+	}
+	return eventID, nil
+}
+
+func enqueueMessageEvent(ctx context.Context, tx *sql.Tx, messageID, eventID int64) error {
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO inbox (event_id, agent_id)
+SELECT ?, agent_id FROM message_recipients WHERE message_id = ?`, eventID, messageID); err != nil {
+		return fmt.Errorf("enqueue message event: %w", err)
+	}
+	return nil
 }
 
 func recipientQuery(request SendRequest, cutoff int64) (string, []any) {
@@ -371,12 +504,13 @@ func (s *Store) ClaimInbox(ctx context.Context, agentID string, limit int) ([]Me
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-SELECT m.id, m.sender_id, a.name, m.target_kind, m.target_id, m.body, m.created_at
+SELECT e.id, m.id, e.kind, m.sender_id, a.name, m.target_kind, m.target_id, e.body, e.created_at
 FROM inbox i
-JOIN messages m ON m.id = i.message_id
+JOIN message_events e ON e.id = i.event_id
+JOIN messages m ON m.id = e.message_id
 JOIN agents a ON a.id = m.sender_id
 WHERE i.agent_id = ? AND i.claimed_at IS NULL
-ORDER BY m.id
+ORDER BY e.id
 LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query inbox: %w", err)
@@ -386,7 +520,7 @@ LIMIT ?`, agentID, limit)
 	for rows.Next() {
 		var message Message
 		var createdAt int64
-		if err := rows.Scan(&message.ID, &message.SenderID, &message.SenderName, &message.TargetKind, &message.TargetID, &message.Body, &createdAt); err != nil {
+		if err := rows.Scan(&message.EventID, &message.ID, &message.EventKind, &message.SenderID, &message.SenderName, &message.TargetKind, &message.TargetID, &message.Body, &createdAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan inbox: %w", err)
 		}
@@ -402,7 +536,7 @@ LIMIT ?`, agentID, limit)
 	for _, message := range messages {
 		result, err := tx.ExecContext(ctx, `
 UPDATE inbox SET claimed_at = ?
-WHERE message_id = ? AND agent_id = ? AND claimed_at IS NULL`, now, message.ID, agentID)
+WHERE event_id = ? AND agent_id = ? AND claimed_at IS NULL`, now, message.EventID, agentID)
 		if err != nil {
 			return nil, fmt.Errorf("claim message: %w", err)
 		}
@@ -480,6 +614,35 @@ ORDER BY i.updated_at DESC`, repoID, excludeAgentID, s.now().UnixMilli())
 	return intents, rows.Err()
 }
 
+func (s *Store) Cleanup(ctx context.Context, messageCutoff time.Time) (CleanupResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("begin cleanup: %w", err)
+	}
+	defer tx.Rollback()
+
+	messageResult, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE created_at < ?`, messageCutoff.UnixMilli())
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("delete expired messages: %w", err)
+	}
+	intentResult, err := tx.ExecContext(ctx, `DELETE FROM intents WHERE expires_at <= ?`, s.now().UnixMilli())
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("delete expired intents: %w", err)
+	}
+	messages, err := messageResult.RowsAffected()
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("count expired messages: %w", err)
+	}
+	intents, err := intentResult.RowsAffected()
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("count expired intents: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return CleanupResult{}, fmt.Errorf("commit cleanup: %w", err)
+	}
+	return CleanupResult{Messages: messages, Intents: intents}, nil
+}
+
 func (s *Store) Agents(ctx context.Context, repoID string) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT DISTINCT a.id, a.harness, a.name, a.last_seen_at
@@ -503,6 +666,43 @@ ORDER BY a.name COLLATE NOCASE`, repoID, repoID)
 		agents = append(agents, agent)
 	}
 	return agents, rows.Err()
+}
+
+func (s *Store) ResolveAgent(ctx context.Context, query string) (Agent, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return Agent{}, errors.New("agent is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, harness, name, last_seen_at
+FROM agents
+WHERE id = ? OR name = ? COLLATE NOCASE OR harness = ? COLLATE NOCASE
+ORDER BY CASE WHEN id = ? THEN 0 WHEN name = ? COLLATE NOCASE THEN 1 ELSE 2 END`, query, query, query, query, query)
+	if err != nil {
+		return Agent{}, fmt.Errorf("resolve agent: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []Agent
+	for rows.Next() {
+		var agent Agent
+		var lastSeen int64
+		if err := rows.Scan(&agent.ID, &agent.Harness, &agent.Name, &lastSeen); err != nil {
+			return Agent{}, fmt.Errorf("scan agent: %w", err)
+		}
+		agent.LastSeen = time.UnixMilli(lastSeen)
+		matches = append(matches, agent)
+	}
+	if err := rows.Err(); err != nil {
+		return Agent{}, fmt.Errorf("resolve agent: %w", err)
+	}
+	if len(matches) == 0 {
+		return Agent{}, fmt.Errorf("agent %q was not found", query)
+	}
+	if len(matches) > 1 && matches[0].ID != query && !strings.EqualFold(matches[0].Name, query) {
+		return Agent{}, fmt.Errorf("agent %q is ambiguous, use its id or full name", query)
+	}
+	return matches[0], nil
 }
 
 func normalizeChannel(name string) string {

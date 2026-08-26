@@ -79,6 +79,9 @@ func TestChannelsAreIndependentFromRepositories(t *testing.T) {
 	store := openTestStore(t)
 	register(t, store, "claude-id", "claude")
 	register(t, store, "cursor-id", "cursor")
+	if err := store.CreateChannel(ctx, "architecture"); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.JoinChannel(ctx, "claude-id", "#architecture"); err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +104,86 @@ func TestChannelsAreIndependentFromRepositories(t *testing.T) {
 	}
 	if len(messages) != 1 || messages[0].TargetID != "architecture" {
 		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestMessageModificationAndRecantAreDeliveredAsEvents(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	register(t, store, "claude-id", "claude")
+	register(t, store, "codex-id", "codex")
+
+	messageID, _, err := store.Send(ctx, SendRequest{
+		SenderID: "claude-id", TargetKind: "agent", TargetID: "codex-id", Body: "I am changing api/v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ModifyMessage(ctx, "claude-id", messageID, "I am changing api/v2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecantMessage(ctx, "claude-id", messageID, "That work is no longer needed"); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := store.ClaimInbox(ctx, "codex-id", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("received %d events, want 3", len(events))
+	}
+	wantKinds := []string{"created", "modified", "recanted"}
+	for i, want := range wantKinds {
+		if events[i].ID != messageID || events[i].EventKind != want {
+			t.Errorf("event %d = %#v, want message %d kind %s", i, events[i], messageID, want)
+		}
+	}
+	if _, err := store.ModifyMessage(ctx, "claude-id", messageID, "too late"); err == nil {
+		t.Fatal("recanted message was modified")
+	}
+	if _, err := store.RecantMessage(ctx, "codex-id", messageID, "not mine"); err == nil {
+		t.Fatal("non-sender recanted a message")
+	}
+}
+
+func TestCleanupRemovesExpiredHistoryAndIntents(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	register(t, store, "claude-id", "claude")
+	register(t, store, "codex-id", "codex")
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+
+	messageID, _, err := store.Send(ctx, SendRequest{
+		SenderID: "claude-id", TargetKind: "agent", TargetID: "codex-id", Body: "old message",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetIntent(ctx, Intent{
+		AgentID: "claude-id", RepoID: "github.com/acme/widget", Summary: "old intent", ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store.now = func() time.Time { return now.Add(8 * 24 * time.Hour) }
+	result, err := store.Cleanup(ctx, store.now().Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Messages != 1 || result.Intents != 1 {
+		t.Fatalf("cleanup = %#v", result)
+	}
+	if _, err := store.ModifyMessage(ctx, "claude-id", messageID, "gone"); err == nil {
+		t.Fatal("expired message history still exists")
+	}
+	events, err := store.ClaimInbox(ctx, "codex-id", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expired inbox events = %#v", events)
 	}
 }
 

@@ -10,14 +10,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const currentVersion = 1
 
+const (
+	DefaultMessageTTL = 7 * 24 * time.Hour
+	MaximumMessageTTL = 30 * 24 * time.Hour
+	MinimumMessageTTL = time.Hour
+)
+
 type Config struct {
-	Version  int              `json:"version"`
-	Database string           `json:"database"`
-	Agents   map[string]Agent `json:"agents"`
+	Version    int              `json:"version"`
+	Database   string           `json:"database"`
+	MessageTTL string           `json:"message_ttl"`
+	Agents     map[string]Agent `json:"agents"`
 }
 
 type Agent struct {
@@ -60,7 +68,7 @@ func Load(path string) (*Config, error) {
 		if pathErr != nil {
 			return nil, pathErr
 		}
-		return &Config{Version: currentVersion, Database: database, Agents: map[string]Agent{}}, nil
+		return &Config{Version: currentVersion, Database: database, MessageTTL: DefaultMessageTTL.String(), Agents: map[string]Agent{}}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -75,6 +83,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Agents == nil {
 		cfg.Agents = map[string]Agent{}
+	}
+	if cfg.MessageTTL == "" {
+		cfg.MessageTTL = DefaultMessageTTL.String()
+	}
+	if _, err := cfg.MessageTTLDuration(); err != nil {
+		return nil, err
 	}
 	if override := os.Getenv("TRAILWIRE_DATABASE"); override != "" {
 		cfg.Database = filepath.Clean(override)
@@ -106,6 +120,31 @@ func (c *Config) EnsureAgent(harness, name string) (Agent, bool, error) {
 	return agent, true, nil
 }
 
+func (c *Config) MessageTTLDuration() (time.Duration, error) {
+	ttl, err := time.ParseDuration(c.MessageTTL)
+	if err != nil {
+		return 0, fmt.Errorf("parse message ttl: %w", err)
+	}
+	if ttl < MinimumMessageTTL {
+		return 0, fmt.Errorf("message ttl must be at least %s", MinimumMessageTTL)
+	}
+	if ttl > MaximumMessageTTL {
+		return 0, fmt.Errorf("message ttl cannot exceed %s", MaximumMessageTTL)
+	}
+	return ttl, nil
+}
+
+func (c *Config) SetMessageTTL(ttl time.Duration) error {
+	if ttl < MinimumMessageTTL {
+		return fmt.Errorf("message ttl must be at least %s", MinimumMessageTTL)
+	}
+	if ttl > MaximumMessageTTL {
+		return fmt.Errorf("message ttl cannot exceed %s", MaximumMessageTTL)
+	}
+	c.MessageTTL = ttl.String()
+	return nil
+}
+
 func Save(path string, cfg *Config) error {
 	if cfg == nil {
 		return errors.New("config is required")
@@ -119,6 +158,12 @@ func Save(path string, cfg *Config) error {
 			return err
 		}
 		cfg.Database = database
+	}
+	if cfg.MessageTTL == "" {
+		cfg.MessageTTL = DefaultMessageTTL.String()
+	}
+	if _, err := cfg.MessageTTLDuration(); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
