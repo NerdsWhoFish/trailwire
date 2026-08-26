@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,8 @@ var (
 )
 
 func main() {
+	buildInfo, _ := debug.ReadBuildInfo()
+	version, commit = resolveBuildVersion(version, commit, buildInfo)
 	ctx := context.Background()
 	shutdown, err := telemetry.Setup(ctx, version)
 	if err != nil {
@@ -89,6 +92,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "trailwire:", err)
 		os.Exit(1)
 	}
+}
+
+func resolveBuildVersion(linkedVersion, linkedCommit string, info *debug.BuildInfo) (string, string) {
+	resolvedVersion := linkedVersion
+	resolvedCommit := linkedCommit
+	if info == nil {
+		return resolvedVersion, resolvedCommit
+	}
+	if resolvedVersion == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		resolvedVersion = strings.TrimPrefix(info.Main.Version, "v")
+	}
+	if resolvedCommit == "unknown" {
+		for _, setting := range info.Settings {
+			if setting.Key != "vcs.revision" || setting.Value == "" {
+				continue
+			}
+			resolvedCommit = setting.Value
+			if len(resolvedCommit) > 7 {
+				resolvedCommit = resolvedCommit[:7]
+			}
+			break
+		}
+	}
+	return resolvedVersion, resolvedCommit
 }
 
 func initCommand() *cli.Command {
