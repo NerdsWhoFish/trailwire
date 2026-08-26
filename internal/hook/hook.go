@@ -135,6 +135,8 @@ func normalizeEvent(harness, event string) string {
 		return "pre_tool"
 	case "posttooluse":
 		return "post_tool"
+	case "posttoolusefailure":
+		return "post_tool_failure"
 	case "stop":
 		return "stop"
 	default:
@@ -148,6 +150,9 @@ func normalizeEvent(harness, event string) string {
 func canInject(harness, event string) bool {
 	if harness == "cursor" {
 		return event == "session_start" || event == "post_tool" || event == "stop"
+	}
+	if event == "post_tool_failure" {
+		return harness == "claude"
 	}
 	return event == "session_start" || event == "prompt_submit" || event == "pre_tool" || event == "post_tool" || event == "stop"
 }

@@ -76,6 +76,33 @@ func TestCursorDoesNotClaimUntilAnInjectableEvent(t *testing.T) {
 	}
 }
 
+func TestClaudeInjectsAfterFailedToolUse(t *testing.T) {
+	ctx := context.Background()
+	configPath, cwd := hookTestEnvironment(t)
+	codex := openHookTestSession(t, ctx, configPath, "codex", cwd)
+	defer codex.Close()
+	claude := openHookTestSession(t, ctx, configPath, "claude", cwd)
+	if err := claude.Touch(ctx, "claude-session"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := codex.Store.Send(ctx, store.SendRequest{
+		SenderID: codex.Agent.ID, TargetKind: "agent", TargetID: claude.Agent.ID, Body: "The failing migration has a replacement",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	input := `{"hook_event_name":"PostToolUseFailure","session_id":"claude-session","cwd":` + quoted(cwd) + `}`
+	output := runHook(t, ctx, Options{Harness: "claude", ConfigPath: configPath}, input)
+	context := nestedString(t, output, "hookSpecificOutput", "additionalContext")
+	if !strings.Contains(context, "The failing migration has a replacement") {
+		t.Fatalf("context = %q", context)
+	}
+}
+
 func hookTestEnvironment(t *testing.T) (string, string) {
 	t.Helper()
 	temp := t.TempDir()
