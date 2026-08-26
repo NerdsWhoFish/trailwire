@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify modules are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go test -race -shuffle=on ./...
+
+      - name: Verify release build
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+
+  markdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint Markdown
+        run: npx --yes markdownlint-cli2@0.23.2

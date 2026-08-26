@@ -1,0 +1,88 @@
+version: 2
+
+project_name: trailwire
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: trailwire
+    main: ./cmd/trailwire
+    binary: trailwire
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [LICENSE, README.md]
+
+checksum:
+  name_template: checksums.txt
+
+homebrew_casks:
+  - name: trailwire
+    binaries: [trailwire]
+    skip_upload: auto
+    repository:
+      owner: TheOutdoorProgrammer
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/TheOutdoorProgrammer/trailwire
+    description: Local coordination for AI coding agents across different harnesses
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "#{staged_path}/trailwire"]
+          end
+    caveats: |
+      Configure Claude Code, Codex, and Cursor, then restart open sessions:
+
+        trailwire init
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat'
+      order: 0
+    - title: Fixes
+      regexp: '^fix'
+      order: 1
+    - title: Refactors
+      regexp: '^refactor'
+      order: 2
+    - title: Tests and docs
+      regexp: '^(test|docs)'
+      order: 3
+  filters:
+    exclude:
+      - '^chore'
+      - '^ci'
+
+release:
+  prerelease: auto
+  footer: |
+    **Install**
+
+    macOS: `brew install TheOutdoorProgrammer/tap/trailwire`
+
+    Other platforms: download an archive above or run
+    `go install github.com/theoutdoorprogrammer/trailwire/cmd/trailwire@{{ .Tag }}`.

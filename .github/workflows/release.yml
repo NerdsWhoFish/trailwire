@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: What to cut
+        type: choice
+        default: Release
+        options: [Release, Release Candidate]
+      bump:
+        description: Which part of the version to bump
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+      dry-run:
+        description: Build everything, publish nothing
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: TheOutdoorProgrammer/quill@v1
+        with:
+          bump: ${{ inputs.bump }}
+          scope: ${{ inputs.scope }}
+          dry-run: ${{ inputs.dry-run }}
+          publish: goreleaser
+          tap-app-id: ${{ secrets.TAP_APP_ID }}
+          tap-private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
