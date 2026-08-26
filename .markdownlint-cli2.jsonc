@@ -1,0 +1,7 @@
+{
+  "config": {
+    "default": true,
+    "MD013": false
+  },
+  "globs": ["**/*.md", "!dist/**"]
+}
