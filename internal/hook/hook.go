@@ -167,7 +167,7 @@ func writeContext(output io.Writer, harness, originalEvent, event, context strin
 		case "stop":
 			return writeJSON(output, map[string]any{"followup_message": context})
 		default:
-			return errors.New("Cursor hook event cannot inject context")
+			return errors.New("cursor hook event cannot inject context")
 		}
 	}
 	return writeJSON(output, map[string]any{

@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/semconv/v1.43.0"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 type Shutdown func(context.Context) error
@@ -52,7 +52,7 @@ func Setup(ctx context.Context, version string) (Shutdown, error) {
 	))
 	return func(shutdownContext context.Context) error {
 		err := provider.Shutdown(shutdownContext)
-		otel.SetTracerProvider(trace.NewNoopTracerProvider())
+		otel.SetTracerProvider(noop.NewTracerProvider())
 		return err
 	}, nil
 }
