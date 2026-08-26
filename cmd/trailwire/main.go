@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	trailwiredocs "github.com/theoutdoorprogrammer/trailwire"
 	"github.com/theoutdoorprogrammer/trailwire/internal/config"
 	trailwirehook "github.com/theoutdoorprogrammer/trailwire/internal/hook"
 	"github.com/theoutdoorprogrammer/trailwire/internal/installer"
@@ -52,6 +53,14 @@ func main() {
 			&cli.StringFlag{Name: "harness", Value: "human", Usage: "sender identity to use"},
 		},
 		Commands: []*cli.Command{
+			{
+				Name:  "skill",
+				Usage: "Print the embedded agent-facing documentation",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					fmt.Fprint(cmd.Writer, trailwiredocs.README)
+					return nil
+				},
+			},
 			initCommand(),
 			hookCommand(),
 			mcpCommand(),
