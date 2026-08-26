@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,6 +16,59 @@ func openTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
+}
+
+func TestConcurrentClaimsDeliverAnEventOnce(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "trailwire.db")
+	first, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	register(t, first, "claude-id", "claude")
+	register(t, first, "codex-id", "codex")
+	if _, _, err := first.Send(ctx, SendRequest{
+		SenderID: "claude-id", TargetKind: "agent", TargetID: "codex-id", Body: "claim me once",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan []Message, 2)
+	errors := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, database := range []*Store{first, second} {
+		wait.Add(1)
+		go func(database *Store) {
+			defer wait.Done()
+			<-start
+			messages, err := database.ClaimInbox(ctx, "codex-id", 50)
+			results <- messages
+			errors <- err
+		}(database)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	total := 0
+	for messages := range results {
+		total += len(messages)
+	}
+	if total != 1 {
+		t.Fatalf("concurrent claims delivered %d events, want 1", total)
+	}
 }
 
 func register(t *testing.T, store *Store, id, harness string) {

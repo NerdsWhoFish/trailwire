@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/theoutdoorprogrammer/trailwire/internal/config"
+	trailwirehook "github.com/theoutdoorprogrammer/trailwire/internal/hook"
 	"github.com/theoutdoorprogrammer/trailwire/internal/mcpserver"
 	"github.com/theoutdoorprogrammer/trailwire/internal/session"
 	"github.com/theoutdoorprogrammer/trailwire/internal/store"
@@ -31,6 +32,7 @@ func main() {
 			&cli.StringFlag{Name: "harness", Value: "human", Usage: "sender identity to use"},
 		},
 		Commands: []*cli.Command{
+			hookCommand(),
 			mcpCommand(),
 			sendCommand(),
 			messageCommand(),
@@ -54,6 +56,22 @@ func main() {
 	if err := command.Run(context.Background(), os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "trailwire:", err)
 		os.Exit(1)
+	}
+}
+
+func hookCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "hook",
+		Usage:     "Handle one harness hook event from stdin",
+		ArgsUsage: "claude|codex|cursor",
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			if cmd.Args().Len() != 1 {
+				return errors.New("harness must be claude, codex, or cursor")
+			}
+			return trailwirehook.Run(ctx, trailwirehook.Options{
+				Harness: cmd.Args().First(), ConfigPath: cmd.String("config"), Input: cmd.Reader, Output: cmd.Writer,
+			})
+		},
 	}
 }
 

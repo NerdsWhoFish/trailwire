@@ -504,14 +504,49 @@ func (s *Store) ClaimInbox(ctx context.Context, agentID string, limit int) ([]Me
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
+UPDATE inbox
+SET claimed_at = ?
+WHERE rowid IN (
+  SELECT rowid FROM inbox
+  WHERE agent_id = ? AND claimed_at IS NULL
+  ORDER BY event_id
+  LIMIT ?
+)
+RETURNING event_id`, s.now().UnixMilli(), agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim inbox: %w", err)
+	}
+	var eventIDs []int64
+	for rows.Next() {
+		var eventID int64
+		if err := rows.Scan(&eventID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan claimed event: %w", err)
+		}
+		eventIDs = append(eventIDs, eventID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close claimed events: %w", err)
+	}
+	if len(eventIDs) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit empty inbox claim: %w", err)
+		}
+		return nil, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(eventIDs)), ",")
+	args := make([]any, 0, len(eventIDs))
+	for _, eventID := range eventIDs {
+		args = append(args, eventID)
+	}
+	rows, err = tx.QueryContext(ctx, `
 SELECT e.id, m.id, e.kind, m.sender_id, a.name, m.target_kind, m.target_id, e.body, e.created_at
-FROM inbox i
-JOIN message_events e ON e.id = i.event_id
+FROM message_events e
 JOIN messages m ON m.id = e.message_id
 JOIN agents a ON a.id = m.sender_id
-WHERE i.agent_id = ? AND i.claimed_at IS NULL
-ORDER BY e.id
-LIMIT ?`, agentID, limit)
+WHERE e.id IN (`+placeholders+`)
+ORDER BY e.id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query inbox: %w", err)
 	}
@@ -531,23 +566,10 @@ LIMIT ?`, agentID, limit)
 		return nil, fmt.Errorf("close inbox: %w", err)
 	}
 
-	now := s.now().UnixMilli()
-	claimed := messages[:0]
-	for _, message := range messages {
-		result, err := tx.ExecContext(ctx, `
-UPDATE inbox SET claimed_at = ?
-WHERE event_id = ? AND agent_id = ? AND claimed_at IS NULL`, now, message.EventID, agentID)
-		if err != nil {
-			return nil, fmt.Errorf("claim message: %w", err)
-		}
-		if affected, _ := result.RowsAffected(); affected == 1 {
-			claimed = append(claimed, message)
-		}
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit inbox claim: %w", err)
 	}
-	return claimed, nil
+	return messages, nil
 }
 
 func (s *Store) SetIntent(ctx context.Context, intent Intent) error {
