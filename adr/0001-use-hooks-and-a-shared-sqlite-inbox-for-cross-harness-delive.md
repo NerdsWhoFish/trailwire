@@ -4,7 +4,9 @@ Date: 2026-08-26
 
 ## Status
 
-Accepted.
+Accepted. The stable per-harness agent identity is superseded by [ADR-0002](0002-bind-delivery-identities-to-resumable-harness-sessions.md).
+
+The shared SQLite inbox, hook delivery, MCP publishing, repository addressing, and security model remain accepted.
 
 ## Context and Problem Statement
 
