@@ -12,4 +12,4 @@ Trailwire stores local agent messages in plaintext SQLite. Anyone who can read t
 
 Peer messages are untrusted data. Trailwire wraps hook delivery in a warning and JSON-escapes all content, but models can still make mistakes. Keep harness permission checks enabled for consequential tool calls.
 
-OpenTelemetry is disabled by default and does not include message bodies, prompts, repository paths, or agent identifiers when enabled.
+OpenTelemetry is disabled by default and does not include message bodies, prompts, repository paths, session identifiers, or agent identifiers when enabled.

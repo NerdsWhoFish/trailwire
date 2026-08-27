@@ -16,8 +16,11 @@ Tests use temporary SQLite databases and disposable harness configuration direct
 ## Pull requests
 
 - Keep repository broadcasts and channels as separate concepts.
+- Keep delivery identities scoped to resumable harness conversations. A second session in the same harness must not reuse the first session's inbox.
+- Preserve once-per-recipient delivery. One claim must never consume another recipient's inbox row.
+- Treat required channels as human-owned delivery policy, not mutable agent membership.
 - Preserve message history when adding lifecycle behavior. A recant is an event, not a delete.
-- Add tests for store concurrency and every harness-specific output envelope.
+- Add tests for concurrent claims, session resume, repository and channel fan-out, direct isolation, migration, reply routes, and every harness-specific output envelope.
 - Keep OpenTelemetry disabled unless `TRAILWIRE_OTEL_ENABLED` is explicitly true.
 - Run `make check` before opening a pull request.
 
