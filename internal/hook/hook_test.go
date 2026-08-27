@@ -103,19 +103,44 @@ func TestClaudeInjectsAfterFailedToolUse(t *testing.T) {
 	}
 }
 
-func TestInjectedChannelMessageIncludesReplyRoute(t *testing.T) {
-	message := store.Message{
-		EventID: 9, ID: 7, EventKind: "created", SenderID: "sender-id", SenderName: "claude@test",
-		TargetKind: "channel", TargetID: "architecture", Body: "Reply in this channel",
+func TestInjectedMessagesIncludeExactReplyRoutes(t *testing.T) {
+	tests := []struct {
+		name       string
+		targetKind string
+		targetID   string
+		wants      []string
+		rejects    []string
+	}{
+		{name: "repository", targetKind: "repo", targetID: "github.com/acme/widget", wants: []string{`"scope": "repo"`}, rejects: []string{`"target": "github.com/acme/widget"`}},
+		{name: "channel", targetKind: "channel", targetID: "architecture", wants: []string{`"scope": "channel"`, `"target": "architecture"`}},
+		{name: "direct", targetKind: "agent", targetID: "recipient-id", wants: []string{`"scope": "agent"`, `"target": "sender-id"`}, rejects: []string{`"target": "recipient-id"`}},
 	}
-	rendered, err := renderContext([]store.Message{message}, nil, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`"sender_id": "sender-id"`, `"reply_to"`, `"scope": "channel"`, `"target": "architecture"`} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("rendered context missing %s: %s", want, rendered)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := store.Message{
+				EventID: 9, ID: 7, EventKind: "created", SenderID: "sender-id", SenderName: "claude@test",
+				TargetKind: test.targetKind, TargetID: test.targetID, Body: "Reply through the original route",
+			}
+			rendered, err := renderContext([]store.Message{message}, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replyIndex := strings.Index(rendered, `"reply_to"`)
+			if replyIndex < 0 || !strings.Contains(rendered, `"sender_id": "sender-id"`) {
+				t.Fatalf("rendered context lacks reply metadata: %s", rendered)
+			}
+			reply := rendered[replyIndex:]
+			for _, want := range test.wants {
+				if !strings.Contains(reply, want) {
+					t.Fatalf("reply route missing %s: %s", want, reply)
+				}
+			}
+			for _, reject := range test.rejects {
+				if strings.Contains(reply, reject) {
+					t.Fatalf("reply route contains %s: %s", reject, reply)
+				}
+			}
+		})
 	}
 }
 

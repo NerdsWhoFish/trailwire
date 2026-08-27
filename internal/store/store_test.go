@@ -414,6 +414,30 @@ func TestDirectMessagesOnlyReachTarget(t *testing.T) {
 	}
 }
 
+func TestResolveAgentRequiresExactIdentityWhenHarnessIsAmbiguous(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t)
+	for _, agent := range []Agent{
+		{ID: "codex-one", Harness: "codex", Name: "codex@test/one"},
+		{ID: "codex-two", Harness: "codex", Name: "codex@test/two"},
+	} {
+		if err := database.RegisterAgent(ctx, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := database.ResolveAgent(ctx, "codex"); err == nil {
+		t.Fatal("ambiguous harness resolved without requiring an exact identity")
+	}
+	resolved, err := database.ResolveAgent(ctx, "codex@test/two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ID != "codex-two" {
+		t.Fatalf("resolved id = %q, want codex-two", resolved.ID)
+	}
+}
+
 func TestExpiredIntentIsNotActive(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
