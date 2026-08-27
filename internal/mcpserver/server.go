@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -115,7 +116,11 @@ func (s *Server) MCP() *mcp.Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	return s.mcp.Run(ctx, &mcp.StdioTransport{})
+	err := s.mcp.Run(ctx, &mcp.StdioTransport{})
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) registerTools() {
