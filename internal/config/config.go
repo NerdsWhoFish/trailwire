@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,11 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
 
-const currentVersion = 1
+const currentVersion = 2
 
 const (
 	DefaultMessageTTL = 7 * 24 * time.Hour
@@ -22,10 +24,13 @@ const (
 )
 
 type Config struct {
-	Version    int              `json:"version"`
-	Database   string           `json:"database"`
-	MessageTTL string           `json:"message_ttl"`
-	Agents     map[string]Agent `json:"agents"`
+	Version        int              `json:"version"`
+	Database       string           `json:"database"`
+	MessageTTL     string           `json:"message_ttl"`
+	InstallationID string           `json:"installation_id"`
+	ForcedChannels []string         `json:"forced_channels,omitempty"`
+	Agents         map[string]Agent `json:"agents"`
+	needsSave      bool
 }
 
 type Agent struct {
@@ -68,7 +73,11 @@ func Load(path string) (*Config, error) {
 		if pathErr != nil {
 			return nil, pathErr
 		}
-		return &Config{Version: currentVersion, Database: database, MessageTTL: DefaultMessageTTL.String(), Agents: map[string]Agent{}}, nil
+		cfg := &Config{Version: currentVersion, Database: database, MessageTTL: DefaultMessageTTL.String(), Agents: map[string]Agent{}, needsSave: true}
+		if err := cfg.ensureInstallationID(); err != nil {
+			return nil, err
+		}
+		return cfg, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -78,17 +87,34 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
-	if cfg.Version != currentVersion {
+	if cfg.Version != 1 && cfg.Version != currentVersion {
 		return nil, fmt.Errorf("unsupported config version %d", cfg.Version)
+	}
+	if cfg.Version == 1 {
+		cfg.Version = currentVersion
+		cfg.needsSave = true
 	}
 	if cfg.Agents == nil {
 		cfg.Agents = map[string]Agent{}
+		cfg.needsSave = true
 	}
 	if cfg.MessageTTL == "" {
 		cfg.MessageTTL = DefaultMessageTTL.String()
+		cfg.needsSave = true
 	}
 	if _, err := cfg.MessageTTLDuration(); err != nil {
 		return nil, err
+	}
+	if err := cfg.ensureInstallationID(); err != nil {
+		return nil, err
+	}
+	channels, err := normalizeChannels(cfg.ForcedChannels)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Join(channels, "\x00") != strings.Join(cfg.ForcedChannels, "\x00") {
+		cfg.ForcedChannels = channels
+		cfg.needsSave = true
 	}
 	if override := os.Getenv("TRAILWIRE_DATABASE"); override != "" {
 		cfg.Database = filepath.Clean(override)
@@ -117,7 +143,45 @@ func (c *Config) EnsureAgent(harness, name string) (Agent, bool, error) {
 	}
 	agent := Agent{ID: id, Name: name}
 	c.Agents[harness] = agent
+	c.needsSave = true
 	return agent, true, nil
+}
+
+func (c *Config) SessionAgent(harness, nativeSessionID string) (Agent, error) {
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	nativeSessionID = strings.TrimSpace(nativeSessionID)
+	if harness == "" || nativeSessionID == "" {
+		return Agent{}, errors.New("harness and native session id are required")
+	}
+	if err := c.ensureInstallationID(); err != nil {
+		return Agent{}, err
+	}
+	base, _, err := c.EnsureAgent(harness, "")
+	if err != nil {
+		return Agent{}, err
+	}
+	sum := sha256.Sum256([]byte(c.InstallationID + "\x00" + harness + "\x00" + nativeSessionID))
+	bytes := sum[:16]
+	bytes[6] = (bytes[6] & 0x0f) | 0x50
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	nativeHash := sha256.Sum256([]byte(nativeSessionID))
+	return Agent{ID: formatID(bytes), Name: base.Name + "/" + hex.EncodeToString(nativeHash[:4])}, nil
+}
+
+func (c *Config) SetForcedChannels(names []string) error {
+	channels, err := normalizeChannels(names)
+	if err != nil {
+		return err
+	}
+	if strings.Join(channels, "\x00") != strings.Join(c.ForcedChannels, "\x00") {
+		c.ForcedChannels = channels
+		c.needsSave = true
+	}
+	return nil
+}
+
+func (c *Config) NeedsSave() bool {
+	return c.needsSave
 }
 
 func (c *Config) MessageTTLDuration() (time.Duration, error) {
@@ -162,6 +226,14 @@ func Save(path string, cfg *Config) error {
 	if cfg.MessageTTL == "" {
 		cfg.MessageTTL = DefaultMessageTTL.String()
 	}
+	if err := cfg.ensureInstallationID(); err != nil {
+		return err
+	}
+	channels, err := normalizeChannels(cfg.ForcedChannels)
+	if err != nil {
+		return err
+	}
+	cfg.ForcedChannels = channels
 	if _, err := cfg.MessageTTLDuration(); err != nil {
 		return err
 	}
@@ -195,7 +267,56 @@ func Save(path string, cfg *Config) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("replace config: %w", err)
 	}
+	cfg.needsSave = false
 	return nil
+}
+
+func (c *Config) ensureInstallationID() error {
+	if strings.TrimSpace(c.InstallationID) != "" {
+		return nil
+	}
+	if agent, ok := c.Agents["human"]; ok && strings.TrimSpace(agent.ID) != "" {
+		c.InstallationID = agent.ID
+		c.needsSave = true
+		return nil
+	}
+	keys := make([]string, 0, len(c.Agents))
+	for harness := range c.Agents {
+		keys = append(keys, harness)
+	}
+	sort.Strings(keys)
+	for _, harness := range keys {
+		if id := strings.TrimSpace(c.Agents[harness].ID); id != "" {
+			c.InstallationID = id
+			c.needsSave = true
+			return nil
+		}
+	}
+	id, err := newID()
+	if err != nil {
+		return err
+	}
+	c.InstallationID = id
+	c.needsSave = true
+	return nil
+}
+
+func normalizeChannels(names []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(names))
+	channels := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(name)), "#")
+		if name == "" {
+			return nil, errors.New("channel name is required")
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		channels = append(channels, name)
+	}
+	sort.Strings(channels)
+	return channels, nil
 }
 
 func newID() (string, error) {
@@ -205,6 +326,10 @@ func newID() (string, error) {
 	}
 	bytes[6] = (bytes[6] & 0x0f) | 0x40
 	bytes[8] = (bytes[8] & 0x3f) | 0x80
-	encoded := hex.EncodeToString(bytes[:])
-	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32], nil
+	return formatID(bytes[:]), nil
+}
+
+func formatID(bytes []byte) string {
+	encoded := hex.EncodeToString(bytes)
+	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
 }

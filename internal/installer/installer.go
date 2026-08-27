@@ -63,7 +63,7 @@ func Install(options Options) (Result, error) {
 	if err != nil {
 		return result, err
 	}
-	configChanged := false
+	configChanged := cfg.NeedsSave()
 	for _, harness := range []string{"claude", "codex", "cursor"} {
 		if _, created, err := cfg.EnsureAgent(harness, ""); err != nil {
 			return result, err

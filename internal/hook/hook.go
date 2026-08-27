@@ -14,11 +14,14 @@ import (
 )
 
 type Input struct {
-	HookEventName  string   `json:"hook_event_name"`
-	SessionID      string   `json:"session_id"`
-	ConversationID string   `json:"conversation_id"`
-	CWD            string   `json:"cwd"`
-	WorkspaceRoots []string `json:"workspace_roots"`
+	HookEventName  string          `json:"hook_event_name"`
+	SessionID      string          `json:"session_id"`
+	ConversationID string          `json:"conversation_id"`
+	CWD            string          `json:"cwd"`
+	WorkspaceRoots []string        `json:"workspace_roots"`
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	ToolUseID      string          `json:"tool_use_id"`
 }
 
 type Options struct {
@@ -36,13 +39,20 @@ type contextEnvelope struct {
 }
 
 type contextEvent struct {
-	EventID   int64  `json:"event_id"`
-	MessageID int64  `json:"message_id"`
-	Kind      string `json:"kind"`
-	From      string `json:"from"`
-	Scope     string `json:"scope"`
-	Target    string `json:"target"`
-	Body      string `json:"body"`
+	EventID   int64      `json:"event_id"`
+	MessageID int64      `json:"message_id"`
+	Kind      string     `json:"kind"`
+	From      string     `json:"from"`
+	SenderID  string     `json:"sender_id"`
+	Scope     string     `json:"scope"`
+	Target    string     `json:"target"`
+	Body      string     `json:"body"`
+	ReplyTo   replyRoute `json:"reply_to"`
+}
+
+type replyRoute struct {
+	Scope  string `json:"scope"`
+	Target string `json:"target,omitempty"`
 }
 
 type contextIntent struct {
@@ -72,14 +82,6 @@ func Run(ctx context.Context, options Options) error {
 	if cwd == "" && len(input.WorkspaceRoots) > 0 {
 		cwd = input.WorkspaceRoots[0]
 	}
-	activeSession, err := session.Open(ctx, session.Options{
-		ConfigPath: options.ConfigPath, Harness: harness, CWD: cwd,
-	})
-	if err != nil {
-		return err
-	}
-	defer activeSession.Close()
-
 	nativeSessionID := input.SessionID
 	if nativeSessionID == "" {
 		nativeSessionID = input.ConversationID
@@ -87,6 +89,14 @@ func Run(ctx context.Context, options Options) error {
 	if nativeSessionID == "" {
 		nativeSessionID = harness + ":default"
 	}
+	activeSession, err := session.Open(ctx, session.Options{
+		ConfigPath: options.ConfigPath, Harness: harness, NativeSessionID: nativeSessionID, CWD: cwd,
+	})
+	if err != nil {
+		return err
+	}
+	defer activeSession.Close()
+
 	event := normalizeEvent(harness, input.HookEventName)
 	if event == "session_end" {
 		if err := activeSession.Store.EndSession(ctx, activeSession.Agent.ID, nativeSessionID); err != nil {
@@ -96,6 +106,13 @@ func Run(ctx context.Context, options Options) error {
 	}
 	if err := activeSession.Touch(ctx, nativeSessionID); err != nil {
 		return err
+	}
+	if event == "pre_tool" {
+		if toolName, fingerprint, ok := session.ToolFingerprint(input.ToolName, input.ToolInput); ok {
+			if err := activeSession.Store.RecordMCPCall(ctx, harness, nativeSessionID, toolName, fingerprint, input.ToolUseID); err != nil {
+				return err
+			}
+		}
 	}
 	if !canInject(harness, event) {
 		return writePassive(options.Output, harness, event)
@@ -193,9 +210,17 @@ func renderContext(messages []store.Message, intents []store.Intent, includeGuid
 		envelope.Guidance = "Trailwire coordinates this agent with peers. Announce work that may affect them, send only useful coordination, modify or recant stale messages, and clear the work intent when finished."
 	}
 	for _, message := range messages {
+		reply := replyRoute{Scope: message.TargetKind}
+		switch message.TargetKind {
+		case "channel":
+			reply.Target = message.TargetID
+		case "agent":
+			reply.Target = message.SenderID
+		}
 		envelope.Events = append(envelope.Events, contextEvent{
 			EventID: message.EventID, MessageID: message.ID, Kind: message.EventKind,
-			From: message.SenderName, Scope: message.TargetKind, Target: message.TargetID, Body: message.Body,
+			From: message.SenderName, SenderID: message.SenderID, Scope: message.TargetKind,
+			Target: message.TargetID, Body: message.Body, ReplyTo: reply,
 		})
 	}
 	for _, intent := range intents {

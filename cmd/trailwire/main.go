@@ -165,7 +165,9 @@ func mcpCommand() *cli.Command {
 		Name:  "mcp",
 		Usage: "Run the Trailwire stdio MCP server",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			s, err := openSession(ctx, cmd, false)
+			s, err := session.Open(ctx, session.Options{
+				ConfigPath: cmd.String("config"), Harness: cmd.String("harness"),
+			})
 			if err != nil {
 				return err
 			}
@@ -431,13 +433,128 @@ func channelCommand() *cli.Command {
 						return err
 					}
 					for _, channel := range channels {
-						fmt.Fprintln(cmd.Writer, "#"+channel)
+						label := "#" + channel.Name
+						if channel.Forced {
+							label += " (required)"
+						}
+						fmt.Fprintln(cmd.Writer, label)
 					}
 					return nil
 				},
 			},
 		},
 	}
+}
+
+func forcedChannelsCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "forced-channels",
+		Usage: "Manage channels every agent must receive",
+		Commands: []*cli.Command{
+			{
+				Name: "list", Usage: "List mandatory channels",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					s, err := openHumanConfigSession(ctx, cmd)
+					if err != nil {
+						return err
+					}
+					defer s.Close()
+					for _, name := range s.Config.ForcedChannels {
+						fmt.Fprintln(cmd.Writer, "#"+name)
+					}
+					return nil
+				},
+			},
+			{
+				Name: "set", ArgsUsage: "CHANNEL...", Usage: "Replace the mandatory channel list",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() == 0 {
+						return errors.New("at least one channel is required; use clear to remove all mandatory channels")
+					}
+					return saveForcedChannels(ctx, cmd, cmd.Args().Slice())
+				},
+			},
+			{
+				Name: "add", ArgsUsage: "CHANNEL...", Usage: "Add mandatory channels",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() == 0 {
+						return errors.New("at least one channel is required")
+					}
+					s, err := openHumanConfigSession(ctx, cmd)
+					if err != nil {
+						return err
+					}
+					defer s.Close()
+					names := append(append([]string{}, s.Config.ForcedChannels...), cmd.Args().Slice()...)
+					return persistForcedChannels(ctx, cmd, s, names)
+				},
+			},
+			{
+				Name: "remove", ArgsUsage: "CHANNEL...", Usage: "Remove mandatory channel policy without removing voluntary memberships",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() == 0 {
+						return errors.New("at least one channel is required")
+					}
+					s, err := openHumanConfigSession(ctx, cmd)
+					if err != nil {
+						return err
+					}
+					defer s.Close()
+					removed := make(map[string]struct{}, cmd.Args().Len())
+					for _, name := range cmd.Args().Slice() {
+						removed[strings.TrimPrefix(strings.ToLower(strings.TrimSpace(name)), "#")] = struct{}{}
+					}
+					names := make([]string, 0, len(s.Config.ForcedChannels))
+					for _, name := range s.Config.ForcedChannels {
+						if _, drop := removed[name]; !drop {
+							names = append(names, name)
+						}
+					}
+					return persistForcedChannels(ctx, cmd, s, names)
+				},
+			},
+			{
+				Name: "clear", Usage: "Remove all mandatory channel policy",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return saveForcedChannels(ctx, cmd, nil)
+				},
+			},
+		},
+	}
+}
+
+func saveForcedChannels(ctx context.Context, cmd *cli.Command, names []string) error {
+	s, err := openHumanConfigSession(ctx, cmd)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return persistForcedChannels(ctx, cmd, s, names)
+}
+
+func persistForcedChannels(ctx context.Context, cmd *cli.Command, s *session.Session, names []string) error {
+	if err := s.Config.SetForcedChannels(names); err != nil {
+		return err
+	}
+	if err := config.Save(s.ConfigPath, s.Config); err != nil {
+		return err
+	}
+	if err := s.Store.SyncForcedChannels(ctx, s.Config.ForcedChannels); err != nil {
+		return err
+	}
+	if len(s.Config.ForcedChannels) == 0 {
+		fmt.Fprintln(cmd.Writer, "mandatory channels cleared")
+		return nil
+	}
+	fmt.Fprintf(cmd.Writer, "mandatory channels: #%s\n", strings.Join(s.Config.ForcedChannels, ", #"))
+	return nil
+}
+
+func openHumanConfigSession(ctx context.Context, cmd *cli.Command) (*session.Session, error) {
+	if !strings.EqualFold(cmd.String("harness"), "human") {
+		return nil, errors.New("mandatory channel policy is human-owned; use the default human harness")
+	}
+	return openSession(ctx, cmd, false)
 }
 
 func messageCommand() *cli.Command {
@@ -529,6 +646,7 @@ func configCommand() *cli.Command {
 					return nil
 				},
 			},
+			forcedChannelsCommand(),
 		},
 	}
 }
@@ -545,6 +663,9 @@ func statusCommand() *cli.Command {
 			defer s.Close()
 			fmt.Fprintf(cmd.Writer, "agent: %s (%s)\n", s.Agent.Name, s.Agent.ID)
 			fmt.Fprintf(cmd.Writer, "database: %s\n", s.Config.Database)
+			if len(s.Config.ForcedChannels) > 0 {
+				fmt.Fprintf(cmd.Writer, "mandatory channels: #%s\n", strings.Join(s.Config.ForcedChannels, ", #"))
+			}
 			if s.Repository != nil {
 				fmt.Fprintf(cmd.Writer, "repository: %s (%s)\n", s.Repository.Display, s.Repository.ID)
 			}
@@ -555,6 +676,6 @@ func statusCommand() *cli.Command {
 
 func openSession(ctx context.Context, cmd *cli.Command, requireRepo bool) (*session.Session, error) {
 	return session.Open(ctx, session.Options{
-		ConfigPath: cmd.String("config"), Harness: cmd.String("harness"), RequireRepo: requireRepo,
+		ConfigPath: cmd.String("config"), Harness: cmd.String("harness"), NativeSessionID: "cli", RequireRepo: requireRepo,
 	})
 }

@@ -128,6 +128,71 @@ func TestRepoMessagesReachActivePeersOnce(t *testing.T) {
 	}
 }
 
+func TestRepoMessagesReachEveryConcurrentSessionOnce(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	register(t, store, "sender-id", "claude")
+	register(t, store, "codex-b", "codex")
+	register(t, store, "codex-c", "codex")
+	for _, id := range []string{"sender-id", "codex-b", "codex-c"} {
+		if err := store.TouchPresence(ctx, id, id+"-session", "github.com/acme/widget"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, recipients, err := store.Send(ctx, SendRequest{
+		SenderID: "sender-id", TargetKind: "repo", TargetID: "github.com/acme/widget", Body: "shared file is changing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recipients != 2 {
+		t.Fatalf("recipients = %d, want 2", recipients)
+	}
+	for _, id := range []string{"codex-b", "codex-c"} {
+		first, err := store.ClaimInbox(ctx, id, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := store.ClaimInbox(ctx, id, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(first) != 1 || len(second) != 0 {
+			t.Fatalf("%s claims = %d then %d, want 1 then 0", id, len(first), len(second))
+		}
+	}
+}
+
+func TestSessionBindingAdoptsLegacyThenSeparatesAndResumes(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	register(t, store, "legacy-codex", "codex")
+	firstCandidate := Agent{ID: "candidate-one", Harness: "codex", Name: "codex@test/one"}
+	first, err := store.BindSession(ctx, "codex", "thread-one", firstCandidate, "legacy-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != "legacy-codex" {
+		t.Fatalf("first session id = %q, want legacy identity", first.ID)
+	}
+	secondCandidate := Agent{ID: "candidate-two", Harness: "codex", Name: "codex@test/two"}
+	second, err := store.BindSession(ctx, "codex", "thread-two", secondCandidate, "legacy-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != "candidate-two" {
+		t.Fatalf("second session id = %q, want distinct candidate", second.ID)
+	}
+	resumed, err := store.BindSession(ctx, "codex", "thread-one", Agent{ID: "wrong", Harness: "codex", Name: "wrong"}, "legacy-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ID != first.ID {
+		t.Fatalf("resumed identity = %q, want %q", resumed.ID, first.ID)
+	}
+}
+
 func TestChannelsAreIndependentFromRepositories(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -158,6 +223,87 @@ func TestChannelsAreIndependentFromRepositories(t *testing.T) {
 	}
 	if len(messages) != 1 || messages[0].TargetID != "architecture" {
 		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestForcedChannelReachesEveryKnownSessionAndCannotBeLeft(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	for _, agent := range []struct{ id, harness string }{{"legacy", "claude"}, {"candidate-b", "codex"}, {"candidate-c", "codex"}} {
+		register(t, store, agent.id, agent.harness)
+	}
+	claude, err := store.BindSession(ctx, "claude", "thread-a", Agent{ID: "new-a", Harness: "claude", Name: "claude/a"}, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexB, err := store.BindSession(ctx, "codex", "thread-b", Agent{ID: "new-b", Harness: "codex", Name: "codex/b"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexC, err := store.BindSession(ctx, "codex", "thread-c", Agent{ID: "new-c", Harness: "codex", Name: "codex/c"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SyncForcedChannels(ctx, []string{"architecture"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, recipients, err := store.Send(ctx, SendRequest{
+		SenderID: claude.ID, TargetKind: "channel", TargetID: "architecture", Body: "contract changed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recipients != 2 {
+		t.Fatalf("recipients = %d, want 2", recipients)
+	}
+	for _, agent := range []Agent{codexB, codexC} {
+		events, err := store.ClaimInbox(ctx, agent.ID, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("%s received %d events, want 1", agent.ID, len(events))
+		}
+	}
+	channels, err := store.Channels(ctx, codexB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 1 || channels[0].Name != "architecture" || !channels[0].Forced {
+		t.Fatalf("channels = %#v", channels)
+	}
+	if err := store.LeaveChannel(ctx, codexB.ID, "architecture"); err == nil {
+		t.Fatal("agent left a mandatory channel")
+	}
+	if err := store.SyncForcedChannels(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	channels, err = store.Channels(ctx, codexB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 0 {
+		t.Fatalf("removed policy still listed: %#v", channels)
+	}
+}
+
+func TestMCPCallContextIsClaimedOnce(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	if err := store.RecordMCPCall(ctx, "cursor", "conversation-1", "trailwire_send", "hash", "call-1"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimMCPCall(ctx, "cursor", "trailwire_send", "hash", "call-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimMCPCall(ctx, "cursor", "trailwire_send", "hash", "call-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != "conversation-1" || second != "" {
+		t.Fatalf("claims = %q then %q", first, second)
 	}
 }
 

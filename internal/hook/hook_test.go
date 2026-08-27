@@ -103,6 +103,22 @@ func TestClaudeInjectsAfterFailedToolUse(t *testing.T) {
 	}
 }
 
+func TestInjectedChannelMessageIncludesReplyRoute(t *testing.T) {
+	message := store.Message{
+		EventID: 9, ID: 7, EventKind: "created", SenderID: "sender-id", SenderName: "claude@test",
+		TargetKind: "channel", TargetID: "architecture", Body: "Reply in this channel",
+	}
+	rendered, err := renderContext([]store.Message{message}, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"sender_id": "sender-id"`, `"reply_to"`, `"scope": "channel"`, `"target": "architecture"`} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered context missing %s: %s", want, rendered)
+		}
+	}
+}
+
 func hookTestEnvironment(t *testing.T) (string, string) {
 	t.Helper()
 	temp := t.TempDir()
@@ -116,7 +132,9 @@ func hookTestEnvironment(t *testing.T) (string, string) {
 
 func openHookTestSession(t *testing.T, ctx context.Context, configPath, harness, cwd string) *session.Session {
 	t.Helper()
-	active, err := session.Open(ctx, session.Options{ConfigPath: configPath, Harness: harness, CWD: cwd, RequireRepo: true})
+	active, err := session.Open(ctx, session.Options{
+		ConfigPath: configPath, Harness: harness, NativeSessionID: harness + "-session", CWD: cwd, RequireRepo: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

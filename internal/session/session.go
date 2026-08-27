@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,19 +15,21 @@ import (
 )
 
 type Session struct {
-	ConfigPath string
-	Config     *config.Config
-	Agent      config.Agent
-	Harness    string
-	Repository *repository.Info
-	Store      *store.Store
+	ConfigPath  string
+	Config      *config.Config
+	Agent       config.Agent
+	LegacyAgent config.Agent
+	Harness     string
+	Repository  *repository.Info
+	Store       *store.Store
 }
 
 type Options struct {
-	ConfigPath  string
-	Harness     string
-	CWD         string
-	RequireRepo bool
+	ConfigPath      string
+	Harness         string
+	NativeSessionID string
+	CWD             string
+	RequireRepo     bool
 }
 
 func Open(ctx context.Context, options Options) (*Session, error) {
@@ -50,7 +53,7 @@ func Open(ctx context.Context, options Options) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if created {
+	if created || cfg.NeedsSave() {
 		if err := config.Save(configPath, cfg); err != nil {
 			return nil, err
 		}
@@ -66,6 +69,10 @@ func Open(ctx context.Context, options Options) (*Session, error) {
 		database.Close()
 		return nil, err
 	}
+	if err := database.SyncForcedChannels(ctx, cfg.ForcedChannels); err != nil {
+		database.Close()
+		return nil, err
+	}
 	ttl, err := cfg.MessageTTLDuration()
 	if err != nil {
 		database.Close()
@@ -76,7 +83,17 @@ func Open(ctx context.Context, options Options) (*Session, error) {
 		return nil, err
 	}
 
-	result := &Session{ConfigPath: configPath, Config: cfg, Agent: agent, Harness: harness, Store: database}
+	result := &Session{ConfigPath: configPath, Config: cfg, LegacyAgent: agent, Harness: harness, Store: database}
+	if harness == "human" {
+		result.Agent = agent
+	} else if strings.TrimSpace(options.NativeSessionID) != "" {
+		bound, err := result.AgentFor(ctx, options.NativeSessionID)
+		if err != nil {
+			result.Close()
+			return nil, err
+		}
+		result.Agent = bound
+	}
 	cwd := options.CWD
 	if cwd == "" {
 		cwd, err = os.Getwd()
@@ -100,11 +117,41 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) Touch(ctx context.Context, nativeSessionID string) error {
+	agent, err := s.AgentFor(ctx, nativeSessionID)
+	if err != nil {
+		return err
+	}
+	s.Agent = agent
+	return s.TouchAgent(ctx, agent, nativeSessionID)
+}
+
+func (s *Session) AgentFor(ctx context.Context, nativeSessionID string) (config.Agent, error) {
+	nativeSessionID = strings.TrimSpace(nativeSessionID)
+	if s.Harness == "human" {
+		return s.LegacyAgent, nil
+	}
+	if nativeSessionID == "" {
+		return config.Agent{}, errors.New("native session id is required")
+	}
+	candidate, err := s.Config.SessionAgent(s.Harness, nativeSessionID)
+	if err != nil {
+		return config.Agent{}, err
+	}
+	bound, err := s.Store.BindSession(ctx, s.Harness, nativeSessionID, store.Agent{
+		ID: candidate.ID, Harness: s.Harness, Name: candidate.Name,
+	}, s.LegacyAgent.ID)
+	if err != nil {
+		return config.Agent{}, err
+	}
+	return config.Agent{ID: bound.ID, Name: bound.Name}, nil
+}
+
+func (s *Session) TouchAgent(ctx context.Context, agent config.Agent, nativeSessionID string) error {
 	if s.Repository == nil {
 		return nil
 	}
 	if strings.TrimSpace(nativeSessionID) == "" {
-		nativeSessionID = s.Harness + ":default"
+		return errors.New("native session id is required")
 	}
-	return s.Store.TouchPresence(ctx, s.Agent.ID, nativeSessionID, s.Repository.ID)
+	return s.Store.TouchPresence(ctx, agent.ID, nativeSessionID, s.Repository.ID)
 }

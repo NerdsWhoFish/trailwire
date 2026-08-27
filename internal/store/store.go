@@ -27,6 +27,11 @@ type Agent struct {
 	LastSeen time.Time
 }
 
+type Channel struct {
+	Name   string
+	Forced bool
+}
+
 type Message struct {
 	EventID    int64
 	ID         int64
@@ -104,6 +109,14 @@ CREATE TABLE IF NOT EXISTS presence (
 );
 CREATE INDEX IF NOT EXISTS presence_repo_seen ON presence(repo_id, last_seen_at);
 
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  harness TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL UNIQUE REFERENCES agents(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (harness, native_session_id)
+);
+
 CREATE TABLE IF NOT EXISTS channels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -115,6 +128,11 @@ CREATE TABLE IF NOT EXISTS channel_members (
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   joined_at INTEGER NOT NULL,
   PRIMARY KEY (channel_id, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS forced_channels (
+  channel_id INTEGER PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+  configured_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -161,11 +179,185 @@ CREATE TABLE IF NOT EXISTS intents (
   PRIMARY KEY (agent_id, repo_id)
 );
 CREATE INDEX IF NOT EXISTS intents_repo_expiry ON intents(repo_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS mcp_call_contexts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  harness TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  arguments_hash TEXT NOT NULL,
+  call_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(harness, native_session_id, tool_name, arguments_hash, call_id)
+);
+CREATE INDEX IF NOT EXISTS mcp_call_context_match ON mcp_call_contexts(harness, tool_name, arguments_hash, created_at);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) BindSession(ctx context.Context, harness, nativeSessionID string, candidate Agent, legacyAgentID string) (Agent, error) {
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	nativeSessionID = strings.TrimSpace(nativeSessionID)
+	legacyAgentID = strings.TrimSpace(legacyAgentID)
+	candidate.ID = strings.TrimSpace(candidate.ID)
+	candidate.Harness = harness
+	candidate.Name = strings.TrimSpace(candidate.Name)
+	if harness == "" || nativeSessionID == "" || candidate.ID == "" || candidate.Name == "" {
+		return Agent{}, errors.New("harness, native session id, and candidate agent are required")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Agent{}, fmt.Errorf("begin session binding: %w", err)
+	}
+	defer tx.Rollback()
+
+	readBinding := func() (Agent, error) {
+		var agent Agent
+		var lastSeen int64
+		err := tx.QueryRowContext(ctx, `
+SELECT a.id, a.harness, a.name, a.last_seen_at
+FROM agent_sessions s
+JOIN agents a ON a.id = s.agent_id
+WHERE s.harness = ? AND s.native_session_id = ?`, harness, nativeSessionID).Scan(&agent.ID, &agent.Harness, &agent.Name, &lastSeen)
+		agent.LastSeen = time.UnixMilli(lastSeen)
+		return agent, err
+	}
+
+	agent, err := readBinding()
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Agent{}, fmt.Errorf("read session binding: %w", err)
+	}
+	if errors.Is(err, sql.ErrNoRows) && legacyAgentID != "" {
+		_, err = tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO agent_sessions (harness, native_session_id, agent_id, created_at)
+SELECT ?, ?, a.id, ?
+FROM agents a
+WHERE a.id = ?
+  AND a.harness = ?
+  AND NOT EXISTS (SELECT 1 FROM agent_sessions existing WHERE existing.agent_id = a.id)`, harness, nativeSessionID, s.now().UnixMilli(), legacyAgentID, harness)
+		if err != nil {
+			return Agent{}, fmt.Errorf("adopt legacy agent: %w", err)
+		}
+		agent, err = readBinding()
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Agent{}, fmt.Errorf("read adopted session binding: %w", err)
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		now := s.now().UnixMilli()
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO agents (id, harness, name, created_at, last_seen_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET harness = excluded.harness, name = excluded.name, last_seen_at = excluded.last_seen_at`, candidate.ID, harness, candidate.Name, now, now); err != nil {
+			return Agent{}, fmt.Errorf("register session agent: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO agent_sessions (harness, native_session_id, agent_id, created_at)
+VALUES (?, ?, ?, ?)`, harness, nativeSessionID, candidate.ID, now); err != nil {
+			return Agent{}, fmt.Errorf("bind session agent: %w", err)
+		}
+		agent, err = readBinding()
+		if err != nil {
+			return Agent{}, fmt.Errorf("read bound session agent: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agents SET last_seen_at = ? WHERE id = ?`, s.now().UnixMilli(), agent.ID); err != nil {
+		return Agent{}, fmt.Errorf("touch bound agent: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Agent{}, fmt.Errorf("commit session binding: %w", err)
+	}
+	return agent, nil
+}
+
+func (s *Store) SyncForcedChannels(ctx context.Context, names []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin forced channel sync: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM forced_channels`); err != nil {
+		return fmt.Errorf("clear forced channels: %w", err)
+	}
+	for _, name := range names {
+		name = normalizeChannel(name)
+		if name == "" {
+			return errors.New("channel name is required")
+		}
+		now := s.now().UnixMilli()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO channels (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING`, name, now); err != nil {
+			return fmt.Errorf("create forced channel: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO forced_channels (channel_id, configured_at)
+SELECT id, ? FROM channels WHERE name = ?
+ON CONFLICT(channel_id) DO UPDATE SET configured_at = excluded.configured_at`, now, name); err != nil {
+			return fmt.Errorf("force channel: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit forced channel sync: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RecordMCPCall(ctx context.Context, harness, nativeSessionID, toolName, argumentsHash, callID string) error {
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	nativeSessionID = strings.TrimSpace(nativeSessionID)
+	toolName = strings.TrimSpace(toolName)
+	argumentsHash = strings.TrimSpace(argumentsHash)
+	callID = strings.TrimSpace(callID)
+	if harness == "" || nativeSessionID == "" || toolName == "" || argumentsHash == "" {
+		return errors.New("harness, native session id, tool name, and arguments hash are required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO mcp_call_contexts (harness, native_session_id, tool_name, arguments_hash, call_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(harness, native_session_id, tool_name, arguments_hash, call_id) DO UPDATE SET created_at = excluded.created_at`, harness, nativeSessionID, toolName, argumentsHash, callID, s.now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("record MCP call context: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ClaimMCPCall(ctx context.Context, harness, toolName, argumentsHash, callID string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin MCP call claim: %w", err)
+	}
+	defer tx.Rollback()
+	cutoff := s.now().Add(-time.Minute).UnixMilli()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_call_contexts WHERE created_at < ?`, cutoff); err != nil {
+		return "", fmt.Errorf("expire MCP call contexts: %w", err)
+	}
+	var id int64
+	var nativeSessionID string
+	err = tx.QueryRowContext(ctx, `
+SELECT id, native_session_id
+FROM mcp_call_contexts
+WHERE harness = ? AND tool_name = ? AND arguments_hash = ? AND created_at >= ?
+ORDER BY CASE WHEN call_id = ? AND ? <> '' THEN 0 ELSE 1 END, created_at, id
+LIMIT 1`, strings.ToLower(strings.TrimSpace(harness)), strings.TrimSpace(toolName), strings.TrimSpace(argumentsHash), cutoff, callID, callID).Scan(&id, &nativeSessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		if err := tx.Commit(); err != nil {
+			return "", fmt.Errorf("commit empty MCP call claim: %w", err)
+		}
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("find MCP call context: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_call_contexts WHERE id = ?`, id); err != nil {
+		return "", fmt.Errorf("claim MCP call context: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit MCP call claim: %w", err)
+	}
+	return nativeSessionID, nil
 }
 
 func (s *Store) RegisterAgent(ctx context.Context, agent Agent) error {
@@ -286,34 +478,56 @@ func (s *Store) ProposeChannel(ctx context.Context, agentID, name string) error 
 }
 
 func (s *Store) LeaveChannel(ctx context.Context, agentID, name string) error {
+	name = normalizeChannel(name)
+	var forced int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM forced_channels fc
+JOIN channels c ON c.id = fc.channel_id
+JOIN agent_sessions session ON session.agent_id = ?
+WHERE c.name = ?`, agentID, name).Scan(&forced); err != nil {
+		return fmt.Errorf("check forced channel: %w", err)
+	}
+	if forced > 0 {
+		return fmt.Errorf("channel %q is required by human configuration", name)
+	}
 	_, err := s.db.ExecContext(ctx, `
 DELETE FROM channel_members
-WHERE agent_id = ? AND channel_id = (SELECT id FROM channels WHERE name = ?)`, agentID, normalizeChannel(name))
+WHERE agent_id = ? AND channel_id = (SELECT id FROM channels WHERE name = ?)`, agentID, name)
 	if err != nil {
 		return fmt.Errorf("leave channel: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) Channels(ctx context.Context, agentID string) ([]string, error) {
+func (s *Store) Channels(ctx context.Context, agentID string) ([]Channel, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT c.name
-FROM channels c
-JOIN channel_members cm ON cm.channel_id = c.id
-WHERE cm.agent_id = ?
-ORDER BY c.name COLLATE NOCASE`, agentID)
+SELECT name, MAX(forced)
+FROM (
+  SELECT c.name, 0 AS forced
+  FROM channels c
+  JOIN channel_members cm ON cm.channel_id = c.id
+  WHERE cm.agent_id = ?
+  UNION ALL
+  SELECT c.name, 1 AS forced
+  FROM channels c
+  JOIN forced_channels fc ON fc.channel_id = c.id
+  WHERE EXISTS (SELECT 1 FROM agent_sessions session WHERE session.agent_id = ?)
+)
+GROUP BY name
+ORDER BY name COLLATE NOCASE`, agentID, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("list channels: %w", err)
 	}
 	defer rows.Close()
 
-	var channels []string
+	var channels []Channel
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var channel Channel
+		if err := rows.Scan(&channel.Name, &channel.Forced); err != nil {
 			return nil, fmt.Errorf("scan channel: %w", err)
 		}
-		channels = append(channels, name)
+		channels = append(channels, channel)
 	}
 	return channels, rows.Err()
 }
@@ -484,10 +698,21 @@ FROM presence p
 WHERE p.repo_id = ? AND p.last_seen_at >= ? AND p.agent_id <> ?`, []any{request.TargetID, cutoff, request.SenderID}
 	case "channel":
 		return `
-SELECT cm.agent_id
-FROM channel_members cm
-JOIN channels c ON c.id = cm.channel_id
-WHERE c.name = ? AND cm.agent_id <> ?`, []any{request.TargetID, request.SenderID}
+SELECT agent_id
+FROM (
+  SELECT cm.agent_id
+  FROM channel_members cm
+  JOIN channels c ON c.id = cm.channel_id
+  WHERE c.name = ?
+  UNION
+  SELECT session.agent_id
+  FROM forced_channels fc
+  JOIN channels c ON c.id = fc.channel_id
+  CROSS JOIN agent_sessions session
+  JOIN agents a ON a.id = session.agent_id
+  WHERE c.name = ? AND a.harness <> 'human'
+)
+WHERE agent_id <> ?`, []any{request.TargetID, request.TargetID, request.SenderID}
 	default:
 		return `SELECT id FROM agents WHERE id = ? AND id <> ?`, []any{request.TargetID, request.SenderID}
 	}
@@ -650,6 +875,9 @@ func (s *Store) Cleanup(ctx context.Context, messageCutoff time.Time) (CleanupRe
 	intentResult, err := tx.ExecContext(ctx, `DELETE FROM intents WHERE expires_at <= ?`, s.now().UnixMilli())
 	if err != nil {
 		return CleanupResult{}, fmt.Errorf("delete expired intents: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_call_contexts WHERE created_at < ?`, s.now().Add(-time.Minute).UnixMilli()); err != nil {
+		return CleanupResult{}, fmt.Errorf("delete expired MCP call contexts: %w", err)
 	}
 	messages, err := messageResult.RowsAffected()
 	if err != nil {
