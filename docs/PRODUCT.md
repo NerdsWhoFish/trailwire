@@ -55,6 +55,13 @@ Trailwire lets local AI coding sessions coordinate across Claude Code, Codex, an
 - Modifications and recants are immutable follow-up events delivered once to every original recipient.
 - Recanted content remains auditable until normal retention cleanup removes the message history.
 
+## Human observation
+
+- The human CLI provides one live TUI over all repository, channel, and direct message events in the shared database.
+- Observation loads all unexpired history before following new message events.
+- Observation never creates or claims inbox deliveries and is unavailable to agent harness identities.
+- Terminal control sequences in peer-authored fields are removed before rendering.
+
 ## Agent guidance
 
 - MCP instructions encourage agents to announce before changing shared files, interfaces, schemas, migrations, configuration, generated outputs, broad refactors, or other likely overlap.

@@ -10,6 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -42,6 +46,21 @@ type Message struct {
 	TargetID   string
 	Body       string
 	CreatedAt  time.Time
+}
+
+type ObservedMessage struct {
+	EventID          int64
+	ID               int64
+	EventKind        string
+	SenderID         string
+	SenderHarness    string
+	SenderName       string
+	TargetKind       string
+	TargetID         string
+	TargetName       string
+	Body             string
+	CreatedAt        time.Time
+	MessageCreatedAt time.Time
 }
 
 type Intent struct {
@@ -793,6 +812,74 @@ ORDER BY e.id`, args...)
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit inbox claim: %w", err)
+	}
+	return messages, nil
+}
+
+func (s *Store) ObserveMessages(ctx context.Context, afterEventID int64, messageCutoff time.Time) (messages []ObservedMessage, err error) {
+	ctx, span := otel.Tracer("github.com/theoutdoorprogrammer/trailwire/internal/store").Start(ctx, "trailwire.store.observe_messages")
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "observe messages failed")
+		} else {
+			span.SetAttributes(attribute.Int("trailwire.observer.event_count", len(messages)))
+		}
+		span.End()
+	}()
+	if afterEventID < 0 {
+		afterEventID = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT
+  e.id,
+  m.id,
+  e.kind,
+  sender.id,
+  sender.harness,
+  sender.name,
+  m.target_kind,
+  m.target_id,
+  COALESCE(target.name, ''),
+  e.body,
+  e.created_at,
+  m.created_at
+FROM message_events e
+JOIN messages m ON m.id = e.message_id
+JOIN agents sender ON sender.id = m.sender_id
+LEFT JOIN agents target ON m.target_kind = 'agent' AND target.id = m.target_id
+WHERE e.id > ? AND m.created_at >= ?
+ORDER BY e.id`, afterEventID, messageCutoff.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("observe messages: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var message ObservedMessage
+		var createdAt, messageCreatedAt int64
+		if err := rows.Scan(
+			&message.EventID,
+			&message.ID,
+			&message.EventKind,
+			&message.SenderID,
+			&message.SenderHarness,
+			&message.SenderName,
+			&message.TargetKind,
+			&message.TargetID,
+			&message.TargetName,
+			&message.Body,
+			&createdAt,
+			&messageCreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan observed message: %w", err)
+		}
+		message.CreatedAt = time.UnixMilli(createdAt)
+		message.MessageCreatedAt = time.UnixMilli(messageCreatedAt)
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("observe messages: %w", err)
 	}
 	return messages, nil
 }

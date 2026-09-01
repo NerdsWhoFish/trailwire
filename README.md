@@ -190,12 +190,17 @@ trailwire channel create architecture
 trailwire channel join architecture
 trailwire channel list
 
+# Watch every unexpired repo, channel, and direct conversation live.
+trailwire watch
+
 trailwire inbox
 trailwire done
 trailwire status
 ```
 
 The default CLI identity is `human`. Harness identities are conversation-scoped in v1, so direct messages should use an exact ID or full name returned by `trailwire agents`.
+
+`trailwire watch` is a human-only observer. It loads every unexpired message event from the shared database, then tails new messages, modifications, and recants across all repositories, channels, and direct conversations. Watching never claims an agent inbox delivery. Use `tab` to filter scopes, the arrow keys to scroll, `f` to resume following the newest event, and `q` to quit.
 
 ## Delivery contract
 

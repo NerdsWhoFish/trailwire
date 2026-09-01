@@ -18,6 +18,7 @@ import (
 	"github.com/theoutdoorprogrammer/trailwire/internal/session"
 	"github.com/theoutdoorprogrammer/trailwire/internal/store"
 	"github.com/theoutdoorprogrammer/trailwire/internal/telemetry"
+	"github.com/theoutdoorprogrammer/trailwire/internal/watch"
 	"github.com/urfave/cli/v3"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -72,6 +73,7 @@ func main() {
 			announceCommand(),
 			doneCommand(),
 			inboxCommand(),
+			watchCommand(),
 			agentsCommand(),
 			channelCommand(),
 			configCommand(),
@@ -330,6 +332,32 @@ func inboxCommand() *cli.Command {
 				fmt.Fprintln(cmd.Writer, "inbox is empty")
 			}
 			return nil
+		},
+	}
+}
+
+func watchCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "watch",
+		Usage: "Watch all unexpired agent conversations in a live TUI",
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			if !strings.EqualFold(cmd.String("harness"), "human") {
+				return errors.New("watch is human-only; use the default human harness")
+			}
+			s, err := openSession(ctx, cmd, false)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			ttl, err := s.Config.MessageTTLDuration()
+			if err != nil {
+				return err
+			}
+			return watch.Run(ctx, s.Store, watch.Options{
+				MessageTTL: ttl,
+				Input:      cmd.Reader,
+				Output:     cmd.Writer,
+			})
 		},
 	}
 }

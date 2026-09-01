@@ -347,6 +347,64 @@ func TestMessageModificationAndRecantAreDeliveredAsEvents(t *testing.T) {
 	}
 }
 
+func TestObserveMessagesReadsUnexpiredHistoryWithoutClaimingInbox(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t)
+	register(t, database, "claude-id", "claude")
+	register(t, database, "codex-id", "codex")
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	database.now = func() time.Time { return now }
+
+	messageID, _, err := database.Send(ctx, SendRequest{
+		SenderID: "claude-id", TargetKind: "agent", TargetID: "codex-id", Body: "Changing the storage contract",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ModifyMessage(ctx, "claude-id", messageID, "Keeping the storage contract stable"); err != nil {
+		t.Fatal(err)
+	}
+
+	history, err := database.ObserveMessages(ctx, 0, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("observed %d events, want 2", len(history))
+	}
+	if history[0].SenderHarness != "claude" || history[0].TargetName != "codex" {
+		t.Fatalf("observed identity = %#v", history[0])
+	}
+	if history[1].EventKind != "modified" || history[1].Body != "Keeping the storage contract stable" {
+		t.Fatalf("observed revision = %#v", history[1])
+	}
+
+	next, err := database.ObserveMessages(ctx, history[0].EventID, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next) != 1 || next[0].EventID != history[1].EventID {
+		t.Fatalf("cursor result = %#v", next)
+	}
+
+	inbox, err := database.ClaimInbox(ctx, "codex-id", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 2 {
+		t.Fatalf("observer claimed inbox events, received %d after observing", len(inbox))
+	}
+
+	database.now = func() time.Time { return now.Add(2 * time.Hour) }
+	expired, err := database.ObserveMessages(ctx, 0, database.now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("observed expired history = %#v", expired)
+	}
+}
+
 func TestCleanupRemovesExpiredHistoryAndIntents(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
