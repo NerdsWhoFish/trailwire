@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -190,6 +191,61 @@ func TestSessionBindingAdoptsLegacyThenSeparatesAndResumes(t *testing.T) {
 	}
 	if resumed.ID != first.ID {
 		t.Fatalf("resumed identity = %q, want %q", resumed.ID, first.ID)
+	}
+}
+
+func TestConcurrentSessionBindingsAcrossConnections(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "trailwire.db")
+	const workers = 32
+	stores := make([]*Store, workers)
+	for i := range stores {
+		store, err := Open(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores[i] = store
+		t.Cleanup(func() {
+			if err := store.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	bound, err := stores[0].BindSession(ctx, "codex", "thread", Agent{
+		ID:      "agent",
+		Harness: "codex",
+		Name:    "codex@test/agent",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errors := make(chan error, workers)
+	var wait sync.WaitGroup
+	for i, store := range stores {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			agent, err := store.BindSession(ctx, "codex", "thread", Agent{
+				ID:      fmt.Sprintf("candidate-%d", i),
+				Harness: "codex",
+				Name:    fmt.Sprintf("codex@test/candidate-%d", i),
+			}, "")
+			if err == nil && agent.ID != bound.ID {
+				err = fmt.Errorf("bound agent = %q, want %q", agent.ID, bound.ID)
+			}
+			errors <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
