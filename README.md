@@ -116,7 +116,7 @@ A session created after a channel message was sent is not added retroactively to
 ### Homebrew
 
 ```sh
-brew install TheOutdoorProgrammer/tap/trailwire
+brew install NerdsWhoFish/tap/trailwire
 trailwire init
 ```
 
@@ -294,6 +294,6 @@ make build
 make install
 ```
 
-Architecture decisions live in [adr/](adr/README.md). Releases are cut from `main` through Quill. GoReleaser builds macOS, Linux, and Windows archives and publishes the Homebrew cask to `TheOutdoorProgrammer/homebrew-tap`.
+Architecture decisions live in [adr/](adr/README.md). Releases are cut from `main` through Quill. GoReleaser builds macOS, Linux, and Windows archives and publishes the Homebrew cask to `NerdsWhoFish/homebrew-tap`.
 
 The complete behavioral contract is in [docs/PRODUCT.md](docs/PRODUCT.md). Contributions start in [CONTRIBUTING.md](CONTRIBUTING.md).

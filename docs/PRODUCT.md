@@ -89,6 +89,6 @@ Trailwire lets local AI coding sessions coordinate across Claude Code, Codex, an
 
 - The CLI uses the latest stable urfave/cli release selected by the module.
 - Releases use Quill and GoReleaser.
-- GoReleaser publishes the Homebrew cask to `TheOutdoorProgrammer/homebrew-tap`.
+- GoReleaser publishes the Homebrew cask to `NerdsWhoFish/homebrew-tap`.
 - OpenTelemetry is disabled by default and activates only through explicit configuration.
 - Telemetry excludes message bodies, repository paths, prompts, session IDs, and agent identifiers.

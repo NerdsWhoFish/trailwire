@@ -38,11 +38,11 @@ homebrew_casks:
     binaries: [trailwire]
     skip_upload: auto
     repository:
-      owner: TheOutdoorProgrammer
+      owner: NerdsWhoFish
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: https://github.com/TheOutdoorProgrammer/trailwire
+    homepage: https://github.com/NerdsWhoFish/trailwire
     description: Local coordination for AI coding agents across different harnesses
     hooks:
       post:
@@ -82,7 +82,7 @@ release:
   footer: |
     **Install**
 
-    macOS: `brew install TheOutdoorProgrammer/tap/trailwire`
+    macOS: `brew install NerdsWhoFish/tap/trailwire`
 
     Other platforms: download an archive above or run
     `go install github.com/theoutdoorprogrammer/trailwire/cmd/trailwire@{{ .Tag }}`.

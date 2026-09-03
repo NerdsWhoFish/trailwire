@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please use [GitHub private vulnerability reporting](https://github.com/TheOutdoorProgrammer/trailwire/security/advisories/new). Do not open a public issue for an undisclosed vulnerability.
+Please use [GitHub private vulnerability reporting](https://github.com/NerdsWhoFish/trailwire/security/advisories/new). Do not open a public issue for an undisclosed vulnerability.
 
 Include the affected version, reproduction steps, impact, and any suggested mitigation. You should receive an acknowledgement through the advisory within seven days.
 
