@@ -44,6 +44,16 @@ func TestCodexHookInjectsOnlyUnreadEvents(t *testing.T) {
 	}
 }
 
+func TestCodexHookAcceptsLargeToolResponse(t *testing.T) {
+	ctx := context.Background()
+	configPath, cwd := hookTestEnvironment(t)
+	input := `{"hook_event_name":"PostToolUse","session_id":"codex-session","cwd":` + quoted(cwd) + `,"tool_name":"image_gen__imagegen","tool_response":{"data":"` + strings.Repeat("A", 2<<20) + `"}}`
+	output := runHook(t, ctx, Options{Harness: "codex", ConfigPath: configPath}, input)
+	if len(output) != 0 {
+		t.Fatalf("output = %#v, want empty response", output)
+	}
+}
+
 func TestCursorDoesNotClaimUntilAnInjectableEvent(t *testing.T) {
 	ctx := context.Background()
 	configPath, cwd := hookTestEnvironment(t)

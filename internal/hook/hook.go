@@ -70,7 +70,7 @@ func Run(ctx context.Context, options Options) error {
 		options.Output = os.Stdout
 	}
 	var input Input
-	decoder := json.NewDecoder(io.LimitReader(options.Input, 1<<20))
+	decoder := json.NewDecoder(options.Input)
 	if err := decoder.Decode(&input); err != nil {
 		return fmt.Errorf("decode hook input: %w", err)
 	}
