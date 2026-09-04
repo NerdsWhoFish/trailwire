@@ -326,7 +326,7 @@ func TestForcedChannelReachesEveryKnownSessionAndCannotBeLeft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(channels) != 1 || channels[0].Name != "architecture" || !channels[0].Forced {
+	if len(channels) != 2 || channels[0].Name != AnnouncementsChannel || !channels[0].Forced || channels[1].Name != "architecture" || !channels[1].Forced {
 		t.Fatalf("channels = %#v", channels)
 	}
 	if err := store.LeaveChannel(ctx, codexB.ID, "architecture"); err == nil {
@@ -339,8 +339,123 @@ func TestForcedChannelReachesEveryKnownSessionAndCannotBeLeft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(channels) != 0 {
+	if len(channels) != 1 || channels[0].Name != AnnouncementsChannel || !channels[0].Forced {
 		t.Fatalf("removed policy still listed: %#v", channels)
+	}
+}
+
+func TestAnnouncementsReachOnlyActiveSessions(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t)
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	database.now = func() time.Time { return now }
+
+	sender, err := database.BindSession(ctx, "claude", "sender-session", Agent{
+		ID: "sender-id", Harness: "claude", Name: "claude@test/sender/11111111",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := database.BindSession(ctx, "codex", "active-session", Agent{
+		ID: "active-id", Harness: "codex", Name: "codex@test/active/22222222",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := database.BindSession(ctx, "cursor", "stale-session", Agent{
+		ID: "stale-id", Harness: "cursor", Name: "cursor@test/stale/33333333",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SyncForcedChannels(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(activeWindow + time.Hour)
+	if _, err := database.BindSession(ctx, "claude", "sender-session", sender, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BindSession(ctx, "codex", "active-session", active, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BindSession(ctx, "codex", "cli", Agent{
+		ID: "synthetic-cli-id", Harness: "codex", Name: "codex@test/cli/44444444",
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	register(t, database, "human-id", "human")
+
+	_, recipients, err := database.Send(ctx, SendRequest{
+		SenderID: sender.ID, TargetKind: "channel", TargetID: AnnouncementsChannel, Body: "Release 2 changes the coordination contract",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recipients != 1 {
+		t.Fatalf("announcement recipients = %d, want 1", recipients)
+	}
+	for agentID, want := range map[string]int{active.ID: 1, stale.ID: 0} {
+		messages, err := database.ClaimInbox(ctx, agentID, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(messages) != want {
+			t.Fatalf("%s received %d announcements, want %d", agentID, len(messages), want)
+		}
+	}
+
+	agents, err := database.Agents(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("active agents = %#v, want sender and active recipient", agents)
+	}
+	allAgents, err := database.Agents(ctx, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allAgents) != 4 {
+		t.Fatalf("all agents = %#v, want four non-human historical sessions", allAgents)
+	}
+
+	channels, err := database.Channels(ctx, active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 1 || channels[0].Name != AnnouncementsChannel || !channels[0].Forced {
+		t.Fatalf("active channels = %#v", channels)
+	}
+	if err := database.LeaveChannel(ctx, active.ID, AnnouncementsChannel); err == nil {
+		t.Fatal("agent left the built-in announcements channel")
+	}
+	if err := database.EndSession(ctx, active.ID, "active-session"); err != nil {
+		t.Fatal(err)
+	}
+	agents, err = database.Agents(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].ID != sender.ID {
+		t.Fatalf("active agents after session end = %#v, want sender only", agents)
+	}
+}
+
+func TestResolveAgentAcceptsUniqueShortSuffix(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t)
+	register(t, database, "codex-id", "codex")
+	if _, err := database.db.ExecContext(ctx, `UPDATE agents SET name = ? WHERE id = ?`, "codex@test/checkout/89abcdef", "codex-id"); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := database.ResolveAgent(ctx, "89abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ID != "codex-id" {
+		t.Fatalf("resolved id = %q, want codex-id", resolved.ID)
 	}
 }
 
@@ -461,7 +576,7 @@ func TestObserveMessagesReadsUnexpiredHistoryWithoutClaimingInbox(t *testing.T) 
 	}
 }
 
-func TestCleanupRemovesExpiredHistoryAndIntents(t *testing.T) {
+func TestCleanupRemovesExpiredHistoryAndLegacyIntents(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	register(t, store, "claude-id", "claude")
@@ -475,9 +590,9 @@ func TestCleanupRemovesExpiredHistoryAndIntents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetIntent(ctx, Intent{
-		AgentID: "claude-id", RepoID: "github.com/acme/widget", Summary: "old intent", ExpiresAt: now.Add(time.Hour),
-	}); err != nil {
+	if _, err := store.db.ExecContext(ctx, `
+INSERT INTO intents (agent_id, repo_id, summary, paths_json, expires_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)`, "claude-id", "github.com/acme/widget", "old intent", "[]", now.Add(time.Hour).UnixMilli(), now.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -549,36 +664,5 @@ func TestResolveAgentRequiresExactIdentityWhenHarnessIsAmbiguous(t *testing.T) {
 	}
 	if resolved.ID != "codex-two" {
 		t.Fatalf("resolved id = %q, want codex-two", resolved.ID)
-	}
-}
-
-func TestExpiredIntentIsNotActive(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	register(t, store, "claude-id", "claude")
-	register(t, store, "codex-id", "codex")
-	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
-	store.now = func() time.Time { return now }
-
-	if err := store.SetIntent(ctx, Intent{
-		AgentID: "claude-id", RepoID: "github.com/acme/widget", Summary: "Changing migrations", Paths: []string{"db/"}, ExpiresAt: now.Add(time.Hour),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	intents, err := store.ActiveIntents(ctx, "github.com/acme/widget", "codex-id")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(intents) != 1 || len(intents[0].Paths) != 1 {
-		t.Fatalf("intents = %#v", intents)
-	}
-
-	store.now = func() time.Time { return now.Add(2 * time.Hour) }
-	intents, err = store.ActiveIntents(ctx, "github.com/acme/widget", "codex-id")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(intents) != 0 {
-		t.Fatalf("expired intents = %#v", intents)
 	}
 }

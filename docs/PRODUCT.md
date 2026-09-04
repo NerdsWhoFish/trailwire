@@ -8,8 +8,11 @@ Trailwire lets local AI coding sessions coordinate across Claude Code, Codex, an
 - Resuming a conversation reuses its agent identity.
 - Concurrent conversations in the same harness receive distinct identities.
 - Hooks and MCP calls from one conversation bind to the same identity.
+- UUID identity is durable and separate from the friendly harness, host, workspace, and short-suffix name shown to humans.
 - The first v1 session for each upgraded harness adopts its v0 identity so one legacy inbox and its voluntary channel memberships survive migration.
-- Direct-recipient lookup must reject ambiguous harness or name matches and require an exact ID or full name.
+- Direct-recipient lookup accepts an exact ID, full friendly name, or unique short suffix and rejects ambiguous matches.
+- Harness-scoped CLI commands bind through the real harness session ID and never invent a synthetic agent identity.
+- Agent listings show non-human sessions active within the last 24 hours unless historical output is explicitly requested.
 
 ## Delivery
 
@@ -28,11 +31,14 @@ Trailwire lets local AI coding sessions coordinate across Claude Code, Codex, an
 - A repository broadcast resolves every other active session in the same canonical repository.
 - Repository identity comes from a normalized `origin` remote. A repository without an origin uses a hash of its Git common directory.
 - Presence expires after 24 hours without activity. A clean session end removes it immediately.
-- Work announcements broadcast to current repository peers and leave a temporary intent visible to sessions that start later.
+- Likely repository overlap is coordinated through repository messages.
 
 ## Channels
 
 - Named channels are independent from repositories and can span repositories.
+- `announcements` is a built-in channel automatically applied to every non-human session active within the last 24 hours.
+- The built-in announcements channel cannot be left or removed through human configuration.
+- Announcements work without repository discovery and do not create repository-scoped work intents.
 - Voluntary membership belongs to one resumable agent session.
 - Humans can configure `forced_channels`, which apply to every known non-human session during recipient resolution.
 - Agents cannot leave a forced channel.
@@ -64,18 +70,17 @@ Trailwire lets local AI coding sessions coordinate across Claude Code, Codex, an
 
 ## Agent guidance
 
-- MCP instructions encourage agents to announce before changing shared files, interfaces, schemas, migrations, configuration, generated outputs, broad refactors, or other likely overlap.
+- MCP instructions direct likely repository overlap to repo-scoped messages and reserve announcements for information useful to every active agent.
 - Tool descriptions distinguish repository, channel, and direct scopes and explain their recipient semantics.
 - Tool descriptions direct replies through the delivered event's `reply_to` route.
 - The manual inbox tool identifies itself as recovery and diagnostics only.
-- Agents clear work intents when work is complete, abandoned, or handed off.
 
 ## Retention
 
 - Message TTL is one global, human-owned setting.
 - Agents cannot choose or override TTL per message.
 - Trailwire accepts retention from one hour through 30 days.
-- Hooks, database-backed CLI commands, and MCP calls opportunistically remove expired messages, work intents, and short-lived MCP call correlations.
+- Hooks, database-backed CLI commands, and MCP calls opportunistically remove expired messages, legacy work intents, and short-lived MCP call correlations.
 
 ## Configuration and migration
 

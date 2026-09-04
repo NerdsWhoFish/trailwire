@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -17,7 +16,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const activeWindow = 24 * time.Hour
+const (
+	activeWindow         = 24 * time.Hour
+	AnnouncementsChannel = "announcements"
+)
 
 type Store struct {
 	db  *sql.DB
@@ -61,16 +63,6 @@ type ObservedMessage struct {
 	Body             string
 	CreatedAt        time.Time
 	MessageCreatedAt time.Time
-}
-
-type Intent struct {
-	AgentID   string
-	AgentName string
-	RepoID    string
-	Summary   string
-	Paths     []string
-	ExpiresAt time.Time
-	UpdatedAt time.Time
 }
 
 type SendRequest struct {
@@ -284,9 +276,11 @@ VALUES (?, ?, ?, ?)`, harness, nativeSessionID, candidate.ID, now); err != nil {
 			return Agent{}, fmt.Errorf("read bound session agent: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agents SET last_seen_at = ? WHERE id = ?`, s.now().UnixMilli(), agent.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE agents SET name = ?, last_seen_at = ? WHERE id = ?`, candidate.Name, s.now().UnixMilli(), agent.ID); err != nil {
 		return Agent{}, fmt.Errorf("touch bound agent: %w", err)
 	}
+	agent.Name = candidate.Name
+	agent.LastSeen = s.now()
 	if err := tx.Commit(); err != nil {
 		return Agent{}, fmt.Errorf("commit session binding: %w", err)
 	}
@@ -302,11 +296,17 @@ func (s *Store) SyncForcedChannels(ctx context.Context, names []string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM forced_channels`); err != nil {
 		return fmt.Errorf("clear forced channels: %w", err)
 	}
+	names = append([]string{AnnouncementsChannel}, names...)
+	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		name = normalizeChannel(name)
 		if name == "" {
 			return errors.New("channel name is required")
 		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
 		now := s.now().UnixMilli()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO channels (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING`, name, now); err != nil {
 			return fmt.Errorf("create forced channel: %w", err)
@@ -393,8 +393,7 @@ INSERT INTO agents (id, harness, name, created_at, last_seen_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   harness = excluded.harness,
-  name = excluded.name,
-  last_seen_at = excluded.last_seen_at`, agent.ID, agent.Harness, agent.Name, now, now)
+  name = excluded.name`, agent.ID, agent.Harness, agent.Name, now, now)
 	if err != nil {
 		return fmt.Errorf("register agent: %w", err)
 	}
@@ -435,9 +434,22 @@ ON CONFLICT(agent_id, session_id) DO UPDATE SET
 }
 
 func (s *Store) EndSession(ctx context.Context, agentID, sessionID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM presence WHERE agent_id = ? AND session_id = ?`, agentID, sessionID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("begin session end: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM presence WHERE agent_id = ? AND session_id = ?`, agentID, sessionID); err != nil {
 		return fmt.Errorf("end session: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE agents
+SET last_seen_at = 0
+WHERE id = ? AND NOT EXISTS (SELECT 1 FROM presence WHERE agent_id = ?)`, agentID, agentID); err != nil {
+		return fmt.Errorf("deactivate agent: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session end: %w", err)
 	}
 	return nil
 }
@@ -716,6 +728,16 @@ SELECT DISTINCT p.agent_id
 FROM presence p
 WHERE p.repo_id = ? AND p.last_seen_at >= ? AND p.agent_id <> ?`, []any{request.TargetID, cutoff, request.SenderID}
 	case "channel":
+		if request.TargetID == AnnouncementsChannel {
+			return `
+SELECT session.agent_id
+FROM agent_sessions session
+JOIN agents a ON a.id = session.agent_id
+WHERE session.native_session_id <> 'cli'
+  AND a.harness <> 'human'
+  AND a.last_seen_at >= ?
+  AND session.agent_id <> ?`, []any{cutoff, request.SenderID}
+		}
 		return `
 SELECT agent_id
 FROM (
@@ -729,7 +751,7 @@ FROM (
   JOIN channels c ON c.id = fc.channel_id
   CROSS JOIN agent_sessions session
   JOIN agents a ON a.id = session.agent_id
-  WHERE c.name = ? AND a.harness <> 'human'
+  WHERE c.name = ? AND a.harness <> 'human' AND session.native_session_id <> 'cli'
 )
 WHERE agent_id <> ?`, []any{request.TargetID, request.TargetID, request.SenderID}
 	default:
@@ -884,70 +906,6 @@ ORDER BY e.id`, afterEventID, messageCutoff.UnixMilli())
 	return messages, nil
 }
 
-func (s *Store) SetIntent(ctx context.Context, intent Intent) error {
-	intent.Summary = strings.TrimSpace(intent.Summary)
-	if intent.AgentID == "" || intent.RepoID == "" || intent.Summary == "" {
-		return errors.New("agent, repository, and summary are required")
-	}
-	if intent.ExpiresAt.IsZero() {
-		intent.ExpiresAt = s.now().Add(4 * time.Hour)
-	}
-	paths, err := json.Marshal(intent.Paths)
-	if err != nil {
-		return fmt.Errorf("encode intent paths: %w", err)
-	}
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO intents (agent_id, repo_id, summary, paths_json, expires_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT(agent_id, repo_id) DO UPDATE SET
-  summary = excluded.summary,
-  paths_json = excluded.paths_json,
-  expires_at = excluded.expires_at,
-  updated_at = excluded.updated_at`, intent.AgentID, intent.RepoID, intent.Summary, string(paths), intent.ExpiresAt.UnixMilli(), s.now().UnixMilli())
-	if err != nil {
-		return fmt.Errorf("set intent: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) ClearIntent(ctx context.Context, agentID, repoID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM intents WHERE agent_id = ? AND repo_id = ?`, agentID, repoID)
-	if err != nil {
-		return fmt.Errorf("clear intent: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) ActiveIntents(ctx context.Context, repoID, excludeAgentID string) ([]Intent, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT i.agent_id, a.name, i.repo_id, i.summary, i.paths_json, i.expires_at, i.updated_at
-FROM intents i
-JOIN agents a ON a.id = i.agent_id
-WHERE i.repo_id = ? AND i.agent_id <> ? AND i.expires_at > ?
-ORDER BY i.updated_at DESC`, repoID, excludeAgentID, s.now().UnixMilli())
-	if err != nil {
-		return nil, fmt.Errorf("list active intents: %w", err)
-	}
-	defer rows.Close()
-
-	var intents []Intent
-	for rows.Next() {
-		var intent Intent
-		var paths string
-		var expiresAt, updatedAt int64
-		if err := rows.Scan(&intent.AgentID, &intent.AgentName, &intent.RepoID, &intent.Summary, &paths, &expiresAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("scan active intent: %w", err)
-		}
-		if err := json.Unmarshal([]byte(paths), &intent.Paths); err != nil {
-			return nil, fmt.Errorf("decode intent paths: %w", err)
-		}
-		intent.ExpiresAt = time.UnixMilli(expiresAt)
-		intent.UpdatedAt = time.UnixMilli(updatedAt)
-		intents = append(intents, intent)
-	}
-	return intents, rows.Err()
-}
-
 func (s *Store) Cleanup(ctx context.Context, messageCutoff time.Time) (CleanupResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -980,13 +938,24 @@ func (s *Store) Cleanup(ctx context.Context, messageCutoff time.Time) (CleanupRe
 	return CleanupResult{Messages: messages, Intents: intents}, nil
 }
 
-func (s *Store) Agents(ctx context.Context, repoID string) ([]Agent, error) {
+func (s *Store) Agents(ctx context.Context, repoID string, includeInactive bool) ([]Agent, error) {
+	cutoff := s.now().Add(-activeWindow).UnixMilli()
 	rows, err := s.db.QueryContext(ctx, `
-SELECT DISTINCT a.id, a.harness, a.name, a.last_seen_at
+SELECT a.id, a.harness, a.name, a.last_seen_at
 FROM agents a
-LEFT JOIN presence p ON p.agent_id = a.id
-WHERE ? = '' OR p.repo_id = ?
-ORDER BY a.name COLLATE NOCASE`, repoID, repoID)
+WHERE a.harness <> 'human'
+  AND (? OR a.last_seen_at >= ?)
+  AND (? OR EXISTS (
+    SELECT 1 FROM agent_sessions session
+    WHERE session.agent_id = a.id AND session.native_session_id <> 'cli'
+  ))
+  AND (
+    ? = '' OR EXISTS (
+      SELECT 1 FROM presence p
+      WHERE p.agent_id = a.id AND p.repo_id = ? AND (? OR p.last_seen_at >= ?)
+    )
+  )
+ORDER BY a.last_seen_at DESC, a.name COLLATE NOCASE`, includeInactive, cutoff, includeInactive, repoID, repoID, includeInactive, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
@@ -1010,11 +979,23 @@ func (s *Store) ResolveAgent(ctx context.Context, query string) (Agent, error) {
 	if query == "" {
 		return Agent{}, errors.New("agent is required")
 	}
+	suffix := "/" + query
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, harness, name, last_seen_at
 FROM agents
-WHERE id = ? OR name = ? COLLATE NOCASE OR harness = ? COLLATE NOCASE
-ORDER BY CASE WHEN id = ? THEN 0 WHEN name = ? COLLATE NOCASE THEN 1 ELSE 2 END`, query, query, query, query, query)
+WHERE id = ?
+   OR name = ? COLLATE NOCASE
+   OR substr(name, -length(?)) = ? COLLATE NOCASE
+   OR (
+     harness = ? COLLATE NOCASE
+     AND last_seen_at >= ?
+     AND EXISTS (
+       SELECT 1 FROM agent_sessions session
+       WHERE session.agent_id = agents.id AND session.native_session_id <> 'cli'
+     )
+   )
+ORDER BY CASE WHEN id = ? THEN 0 WHEN name = ? COLLATE NOCASE THEN 1 ELSE 2 END`,
+		query, query, suffix, suffix, query, s.now().Add(-activeWindow).UnixMilli(), query, query)
 	if err != nil {
 		return Agent{}, fmt.Errorf("resolve agent: %w", err)
 	}

@@ -15,13 +15,15 @@ import (
 )
 
 type Session struct {
-	ConfigPath  string
-	Config      *config.Config
-	Agent       config.Agent
-	LegacyAgent config.Agent
-	Harness     string
-	Repository  *repository.Info
-	Store       *store.Store
+	ConfigPath      string
+	Config          *config.Config
+	Agent           config.Agent
+	LegacyAgent     config.Agent
+	Harness         string
+	NativeSessionID string
+	Repository      *repository.Info
+	Store           *store.Store
+	Workspace       string
 }
 
 type Options struct {
@@ -83,16 +85,10 @@ func Open(ctx context.Context, options Options) (*Session, error) {
 		return nil, err
 	}
 
-	result := &Session{ConfigPath: configPath, Config: cfg, LegacyAgent: agent, Harness: harness, Store: database}
-	if harness == "human" {
-		result.Agent = agent
-	} else if strings.TrimSpace(options.NativeSessionID) != "" {
-		bound, err := result.AgentFor(ctx, options.NativeSessionID)
-		if err != nil {
-			result.Close()
-			return nil, err
-		}
-		result.Agent = bound
+	nativeSessionID := strings.TrimSpace(options.NativeSessionID)
+	result := &Session{
+		ConfigPath: configPath, Config: cfg, LegacyAgent: agent, Harness: harness,
+		NativeSessionID: nativeSessionID, Store: database,
 	}
 	cwd := options.CWD
 	if cwd == "" {
@@ -108,6 +104,17 @@ func Open(ctx context.Context, options Options) (*Session, error) {
 	} else if options.RequireRepo {
 		result.Close()
 		return nil, repoErr
+	}
+	result.Workspace = workspaceName(cwd)
+	if harness == "human" {
+		result.Agent = agent
+	} else if nativeSessionID != "" {
+		bound, err := result.AgentFor(ctx, nativeSessionID)
+		if err != nil {
+			result.Close()
+			return nil, err
+		}
+		result.Agent = bound
 	}
 	return result, nil
 }
@@ -125,6 +132,10 @@ func (s *Session) Touch(ctx context.Context, nativeSessionID string) error {
 	return s.TouchAgent(ctx, agent, nativeSessionID)
 }
 
+func (s *Session) TouchCurrent(ctx context.Context) error {
+	return s.Touch(ctx, s.NativeSessionID)
+}
+
 func (s *Session) AgentFor(ctx context.Context, nativeSessionID string) (config.Agent, error) {
 	nativeSessionID = strings.TrimSpace(nativeSessionID)
 	if s.Harness == "human" {
@@ -133,7 +144,7 @@ func (s *Session) AgentFor(ctx context.Context, nativeSessionID string) (config.
 	if nativeSessionID == "" {
 		return config.Agent{}, errors.New("native session id is required")
 	}
-	candidate, err := s.Config.SessionAgent(s.Harness, nativeSessionID)
+	candidate, err := s.Config.SessionAgent(s.Harness, nativeSessionID, s.Workspace)
 	if err != nil {
 		return config.Agent{}, err
 	}
@@ -144,6 +155,32 @@ func (s *Session) AgentFor(ctx context.Context, nativeSessionID string) (config.
 		return config.Agent{}, err
 	}
 	return config.Agent{ID: bound.ID, Name: bound.Name}, nil
+}
+
+func EnvironmentSessionID(harness string) string {
+	keys := []string{"TRAILWIRE_SESSION_ID"}
+	switch strings.ToLower(strings.TrimSpace(harness)) {
+	case "claude":
+		keys = append(keys, "CLAUDE_CODE_SESSION_ID")
+	case "codex":
+		keys = append(keys, "CODEX_THREAD_ID", "CODEX_SESSION_ID")
+	case "cursor":
+		keys = append(keys, "CURSOR_CONVERSATION_ID", "CURSOR_SESSION_ID")
+	}
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func workspaceName(cwd string) string {
+	name := strings.TrimSpace(filepath.Base(filepath.Clean(cwd)))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "workspace"
+	}
+	return name
 }
 
 func (s *Session) TouchAgent(ctx context.Context, agent config.Agent, nativeSessionID string) error {

@@ -131,7 +131,7 @@ func TestInjectedMessagesIncludeExactReplyRoutes(t *testing.T) {
 				EventID: 9, ID: 7, EventKind: "created", SenderID: "sender-id", SenderName: "claude@test",
 				TargetKind: test.targetKind, TargetID: test.targetID, Body: "Reply through the original route",
 			}
-			rendered, err := renderContext([]store.Message{message}, nil, false)
+			rendered, err := renderContext([]store.Message{message}, false)
 			if err != nil {
 				t.Fatal(err)
 			}

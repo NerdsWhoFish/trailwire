@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/theoutdoorprogrammer/trailwire/internal/session"
+	"github.com/theoutdoorprogrammer/trailwire/internal/store"
 )
 
 func TestMCPRoutesMessagesAndProposesChannels(t *testing.T) {
@@ -89,8 +90,66 @@ func TestMCPRoutesMessagesAndProposesChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(channels) != 1 || channels[0].Name != "architecture" || channels[0].Forced {
+	if len(channels) != 2 || channels[0].Name != "announcements" || !channels[0].Forced || channels[1].Name != "architecture" || channels[1].Forced {
 		t.Fatalf("channels = %#v", channels)
+	}
+}
+
+func TestMCPAnnounceWorksOutsideGitRepository(t *testing.T) {
+	ctx := context.Background()
+	temp := t.TempDir()
+	t.Setenv("TRAILWIRE_DATA_DIR", filepath.Join(temp, "data"))
+	configPath := filepath.Join(temp, "config.json")
+	workspace := filepath.Join(temp, "release-coordination")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	recipient, err := session.Open(ctx, session.Options{
+		ConfigPath: configPath, Harness: "codex", NativeSessionID: "recipient-session", CWD: workspace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recipient.Close()
+	sender, err := session.Open(ctx, session.Options{
+		ConfigPath: configPath, Harness: "claude", NativeSessionID: "sender-session", CWD: workspace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	t.Setenv("TRAILWIRE_SESSION_ID", "sender-session")
+
+	server := New(sender, "test")
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.MCP().Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "trailwire_announce", Arguments: map[string]any{"summary": "Release 2 changes the delivery contract"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("announce tool failed: %#v", result.Content)
+	}
+	events, err := recipient.Store.ClaimInbox(ctx, recipient.Agent.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Body != "Release 2 changes the delivery contract" || events[0].TargetKind != "channel" || events[0].TargetID != store.AnnouncementsChannel {
+		t.Fatalf("announcement events = %#v", events)
 	}
 }
 
@@ -213,10 +272,10 @@ func TestToolDescriptionsTeachProactiveAndAutomaticCoordination(t *testing.T) {
 		descriptions[tool.Name] = tool.Description
 	}
 	checks := map[string][]string{
-		"trailwire_announce":    {"Proactively announce", "shared interfaces", "likely file overlap"},
+		"trailwire_announce":    {"every active agent", "outside Git repositories", "repo-scoped trailwire_send"},
 		"trailwire_send":        {"once to each eligible recipient", "reply_to"},
 		"trailwire_check_inbox": {"Manual recovery", "do not poll", "never blocks another recipient"},
-		"trailwire_list_agents": {"multiple concurrent sessions", "exact id or full name"},
+		"trailwire_list_agents": {"Friendly names", "workspace", "unique short suffix"},
 	}
 	for name, fragments := range checks {
 		for _, fragment := range fragments {

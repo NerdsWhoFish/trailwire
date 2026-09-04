@@ -65,6 +65,9 @@ func TestVersionOneIdentityInboxAndMembershipMigrateToFirstSession(t *testing.T)
 	if first.Agent.ID != legacyCodexID {
 		t.Fatalf("first v1 session id = %q, want legacy id", first.Agent.ID)
 	}
+	if !strings.Contains(first.Agent.Name, "/"+filepath.Base(temp)+"/") {
+		t.Fatalf("first v1 session name does not include workspace: %q", first.Agent.Name)
+	}
 	events, err := first.Store.ClaimInbox(ctx, first.Agent.ID, 50)
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +79,7 @@ func TestVersionOneIdentityInboxAndMembershipMigrateToFirstSession(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(channels) != 1 || channels[0].Name != "architecture" || channels[0].Forced {
+	if len(channels) != 2 || channels[0].Name != store.AnnouncementsChannel || !channels[0].Forced || channels[1].Name != "architecture" || channels[1].Forced {
 		t.Fatalf("migrated channels = %#v", channels)
 	}
 	if err := first.Close(); err != nil {
@@ -110,5 +113,20 @@ func TestVersionOneIdentityInboxAndMembershipMigrateToFirstSession(t *testing.T)
 	}
 	if loaded.NeedsSave() {
 		t.Fatal("migrated config still needs saving")
+	}
+}
+
+func TestEnvironmentSessionIDUsesHarnessIdentity(t *testing.T) {
+	for _, key := range []string{"TRAILWIRE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CURSOR_CONVERSATION_ID", "CURSOR_SESSION_ID"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("CODEX_THREAD_ID", "codex-thread")
+	t.Setenv("CODEX_SESSION_ID", "codex-session")
+	if got := EnvironmentSessionID("codex"); got != "codex-thread" {
+		t.Fatalf("Codex session id = %q, want codex-thread", got)
+	}
+	t.Setenv("TRAILWIRE_SESSION_ID", "explicit-session")
+	if got := EnvironmentSessionID("codex"); got != "explicit-session" {
+		t.Fatalf("explicit session id = %q, want explicit-session", got)
 	}
 }

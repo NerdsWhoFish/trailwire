@@ -2,6 +2,7 @@ package main
 
 import (
 	"runtime/debug"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +39,21 @@ func TestResolveBuildVersionUsesVCSRevisionForLocalBuilds(t *testing.T) {
 	version, commit := resolveBuildVersion("dev", "unknown", info)
 	if version != "dev" || commit != "abcdef0" {
 		t.Fatalf("resolved %s (%s)", version, commit)
+	}
+}
+
+func TestCLINativeSessionIDNeverInventsHarnessIdentity(t *testing.T) {
+	for _, key := range []string{"TRAILWIRE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"} {
+		t.Setenv(key, "")
+	}
+	if _, err := cliNativeSessionID("codex"); err == nil || !strings.Contains(err.Error(), "session id is unavailable") {
+		t.Fatalf("missing Codex identity error = %v", err)
+	}
+	t.Setenv("CODEX_THREAD_ID", "real-thread")
+	if got, err := cliNativeSessionID("codex"); err != nil || got != "real-thread" {
+		t.Fatalf("Codex identity = %q, %v", got, err)
+	}
+	if got, err := cliNativeSessionID("human"); err != nil || got != "cli" {
+		t.Fatalf("human identity = %q, %v", got, err)
 	}
 }

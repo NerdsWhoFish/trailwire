@@ -147,9 +147,10 @@ func (c *Config) EnsureAgent(harness, name string) (Agent, bool, error) {
 	return agent, true, nil
 }
 
-func (c *Config) SessionAgent(harness, nativeSessionID string) (Agent, error) {
+func (c *Config) SessionAgent(harness, nativeSessionID, workspace string) (Agent, error) {
 	harness = strings.ToLower(strings.TrimSpace(harness))
 	nativeSessionID = strings.TrimSpace(nativeSessionID)
+	workspace = strings.TrimSpace(workspace)
 	if harness == "" || nativeSessionID == "" {
 		return Agent{}, errors.New("harness and native session id are required")
 	}
@@ -165,7 +166,11 @@ func (c *Config) SessionAgent(harness, nativeSessionID string) (Agent, error) {
 	bytes[6] = (bytes[6] & 0x0f) | 0x50
 	bytes[8] = (bytes[8] & 0x3f) | 0x80
 	nativeHash := sha256.Sum256([]byte(nativeSessionID))
-	return Agent{ID: formatID(bytes), Name: base.Name + "/" + hex.EncodeToString(nativeHash[:4])}, nil
+	name := base.Name
+	if workspace != "" {
+		name += "/" + workspace
+	}
+	return Agent{ID: formatID(bytes), Name: name + "/" + hex.EncodeToString(nativeHash[:4])}, nil
 }
 
 func (c *Config) SetForcedChannels(names []string) error {

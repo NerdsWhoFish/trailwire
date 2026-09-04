@@ -71,7 +71,6 @@ func main() {
 			sendCommand(),
 			messageCommand(),
 			announceCommand(),
-			doneCommand(),
 			inboxCommand(),
 			watchCommand(),
 			agentsCommand(),
@@ -213,7 +212,7 @@ func sendCommand() *cli.Command {
 				return err
 			}
 			defer s.Close()
-			if err := s.Touch(ctx, "cli"); err != nil {
+			if err := s.TouchCurrent(ctx); err != nil {
 				return err
 			}
 
@@ -243,62 +242,28 @@ func sendCommand() *cli.Command {
 func announceCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "announce",
-		Usage:     "Tell repository peers what you are changing",
-		ArgsUsage: "SUMMARY",
-		Flags: []cli.Flag{
-			&cli.StringSliceFlag{Name: "path", Aliases: []string{"p"}, Usage: "affected path, repeatable"},
-			&cli.DurationFlag{Name: "ttl", Value: 4 * time.Hour, Usage: "how long the work intent stays active"},
-		},
+		Usage:     "Tell every active agent something useful",
+		ArgsUsage: "MESSAGE",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			summary := strings.TrimSpace(strings.Join(cmd.Args().Slice(), " "))
-			if summary == "" {
-				return errors.New("summary is required")
+			body := strings.TrimSpace(strings.Join(cmd.Args().Slice(), " "))
+			if body == "" {
+				return errors.New("message is required")
 			}
-			s, err := openSession(ctx, cmd, true)
+			s, err := openSession(ctx, cmd, false)
 			if err != nil {
 				return err
 			}
 			defer s.Close()
-			if err := s.Touch(ctx, "cli"); err != nil {
+			if err := s.TouchCurrent(ctx); err != nil {
 				return err
 			}
-			intent := store.Intent{
-				AgentID: s.Agent.ID, RepoID: s.Repository.ID, Summary: summary,
-				Paths: cmd.StringSlice("path"), ExpiresAt: time.Now().Add(cmd.Duration("ttl")),
-			}
-			if err := s.Store.SetIntent(ctx, intent); err != nil {
-				return err
-			}
-			body := "Working on: " + summary
-			if len(intent.Paths) > 0 {
-				body += "\nAffected paths: " + strings.Join(intent.Paths, ", ")
-			}
-			_, recipients, err := s.Store.Send(ctx, store.SendRequest{
-				SenderID: s.Agent.ID, TargetKind: "repo", TargetID: s.Repository.ID, Body: body,
+			id, recipients, err := s.Store.Send(ctx, store.SendRequest{
+				SenderID: s.Agent.ID, TargetKind: "channel", TargetID: store.AnnouncementsChannel, Body: body,
 			})
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.Writer, "announced work to %d repository peer(s)\n", recipients)
-			return nil
-		},
-	}
-}
-
-func doneCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "done",
-		Usage: "Clear your active work intent in this repository",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			s, err := openSession(ctx, cmd, true)
-			if err != nil {
-				return err
-			}
-			defer s.Close()
-			if err := s.Store.ClearIntent(ctx, s.Agent.ID, s.Repository.ID); err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.Writer, "cleared active work intent")
+			fmt.Fprintf(cmd.Writer, "announced message %d to %d agent(s)\n", id, recipients)
 			return nil
 		},
 	}
@@ -314,7 +279,7 @@ func inboxCommand() *cli.Command {
 				return err
 			}
 			defer s.Close()
-			if err := s.Touch(ctx, "cli"); err != nil {
+			if err := s.TouchCurrent(ctx); err != nil {
 				return err
 			}
 			messages, err := s.Store.ClaimInbox(ctx, s.Agent.ID, 50)
@@ -365,8 +330,12 @@ func watchCommand() *cli.Command {
 func agentsCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "agents",
-		Usage: "List known agents",
-		Flags: []cli.Flag{&cli.BoolFlag{Name: "repo", Usage: "only agents seen in this repository"}},
+		Usage: "List active agents",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "repo", Usage: "only agents seen in this repository"},
+			&cli.BoolFlag{Name: "all", Usage: "include inactive historical agents"},
+			&cli.BoolFlag{Name: "verbose", Usage: "show full agent UUIDs"},
+		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			s, err := openSession(ctx, cmd, cmd.Bool("repo"))
 			if err != nil {
@@ -377,12 +346,16 @@ func agentsCommand() *cli.Command {
 			if cmd.Bool("repo") {
 				repoID = s.Repository.ID
 			}
-			agents, err := s.Store.Agents(ctx, repoID)
+			agents, err := s.Store.Agents(ctx, repoID, cmd.Bool("all"))
 			if err != nil {
 				return err
 			}
 			for _, agent := range agents {
-				fmt.Fprintf(cmd.Writer, "%s\t%s\t%s\n", agent.ID, agent.Harness, agent.Name)
+				if cmd.Bool("verbose") {
+					fmt.Fprintf(cmd.Writer, "%s\t%s\t%s\t%s\n", agent.ID, agent.Name, agent.Harness, agent.LastSeen.Format(time.RFC3339))
+					continue
+				}
+				fmt.Fprintf(cmd.Writer, "%s\t%s\t%s\n", agent.Name, agent.Harness, agent.LastSeen.Format(time.RFC3339))
 			}
 			return nil
 		},
@@ -703,7 +676,23 @@ func statusCommand() *cli.Command {
 }
 
 func openSession(ctx context.Context, cmd *cli.Command, requireRepo bool) (*session.Session, error) {
+	harness := strings.ToLower(strings.TrimSpace(cmd.String("harness")))
+	nativeSessionID, err := cliNativeSessionID(harness)
+	if err != nil {
+		return nil, err
+	}
 	return session.Open(ctx, session.Options{
-		ConfigPath: cmd.String("config"), Harness: cmd.String("harness"), NativeSessionID: "cli", RequireRepo: requireRepo,
+		ConfigPath: cmd.String("config"), Harness: harness, NativeSessionID: nativeSessionID, RequireRepo: requireRepo,
 	})
+}
+
+func cliNativeSessionID(harness string) (string, error) {
+	if harness == "" || harness == "human" {
+		return "cli", nil
+	}
+	nativeSessionID := session.EnvironmentSessionID(harness)
+	if nativeSessionID == "" {
+		return "", fmt.Errorf("%s session id is unavailable; run inside that harness or set TRAILWIRE_SESSION_ID", harness)
+	}
+	return nativeSessionID, nil
 }

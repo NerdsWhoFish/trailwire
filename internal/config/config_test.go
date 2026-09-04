@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,15 +103,15 @@ func TestSessionAgentsAreStableAndDistinct(t *testing.T) {
 			"codex": {ID: "22222222-2222-4222-8222-222222222222", Name: "codex@test"},
 		},
 	}
-	first, err := cfg.SessionAgent("codex", "thread-one")
+	first, err := cfg.SessionAgent("codex", "thread-one", "checkout-one")
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := cfg.SessionAgent("codex", "thread-one")
+	again, err := cfg.SessionAgent("codex", "thread-one", "checkout-one")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := cfg.SessionAgent("codex", "thread-two")
+	second, err := cfg.SessionAgent("codex", "thread-two", "checkout-one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +120,9 @@ func TestSessionAgentsAreStableAndDistinct(t *testing.T) {
 	}
 	if first.ID == second.ID || first.Name == second.Name {
 		t.Fatalf("concurrent sessions collapsed: %#v and %#v", first, second)
+	}
+	if !strings.Contains(first.Name, "/checkout-one/") {
+		t.Fatalf("session name does not include workspace: %q", first.Name)
 	}
 }
 

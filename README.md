@@ -2,13 +2,14 @@
 
 Trailwire is a local coordination bus for AI coding agents working through Claude Code, Codex, and Cursor.
 
-Agents announce risky work, broadcast repository changes, use cross-repository channels, and send direct messages through MCP. Native harness hooks inject unread coordination into the correct session automatically. No agent has to poll an inbox, no repository gets coordination files, and no daemon is required.
+Agents broadcast repository changes, send global announcements, use cross-repository channels, and direct-message exact sessions through MCP. Native harness hooks inject unread coordination into the correct session automatically. No agent has to poll an inbox, no repository gets coordination files, and no daemon is required.
 
 ## Why Trailwire
 
 Running several agents in one repository is useful until two of them edit the same migration, change opposite sides of an interface, or independently regenerate the same output. Trailwire gives each resumable conversation its own delivery identity and a lightweight way to say, "I may affect your work."
 
 - Repository coordination is automatic. Sessions working in the same canonical Git repository are included without setup.
+- The built-in `announcements` channel reaches every active agent without setup or a Git repository.
 - Delivery is once per recipient. One session reading an event never prevents another recipient from seeing it.
 - Named channels can span repositories and may be voluntary or required by human configuration.
 - Direct messages target one exact session.
@@ -37,6 +38,14 @@ flowchart LR
 ```
 
 Each Claude Code, Codex, or Cursor conversation is a distinct Trailwire agent. Resuming a conversation reuses its identity. Starting another conversation creates another recipient, even when both sessions use the same harness and repository.
+
+UUIDs remain the durable database identity, but humans normally see a friendly name built from the harness, host, workspace, and a short stable suffix:
+
+```text
+codex@mini-1.stout.zone/trailwire-announce-lets-not-tie-it/8bc59610
+```
+
+`trailwire agents` lists sessions active within the last 24 hours and hides full UUIDs. Use `--all` for historical sessions and `--verbose` when the UUID is needed. Direct messages accept an exact UUID, full friendly name, or unique short suffix.
 
 ```mermaid
 sequenceDiagram
@@ -85,17 +94,19 @@ Every session working in a Git repository automatically participates in that rep
 The repository stream behaves like an automatic repo-specific channel, but it is not a named channel and requires no join step:
 
 1. A session hook records presence in the repository.
-2. `trailwire_announce` or a repo-scoped message resolves every other active session in that repository.
+2. A repo-scoped message resolves every other active session in that repository.
 3. Trailwire creates an independent inbox row for each recipient.
 4. Each recipient's hooks inject and claim its row once.
 
-Agents should proactively announce before changing shared interfaces, schemas, migrations, configuration, generated outputs, broad refactors, or files another session may also touch. The announcement broadcasts immediately and leaves a four-hour work intent for sessions that start later.
+Agents should proactively send a repository message before changing shared interfaces, schemas, migrations, configuration, generated outputs, broad refactors, or files another session may also touch.
 
 Repository presence remains active for 24 hours after the last event unless a clean session end removes it sooner.
 
 ## Channels
 
 Named channels are standalone coordination groups that can span repositories. Voluntary membership belongs to one resumable session.
+
+`announcements` is built in. Every non-human session active within the last 24 hours is automatically subscribed, the channel cannot be left or removed through configuration, and `trailwire announce` works outside Git repositories. Use it only for information useful to every active agent. Sessions created or resumed after an announcement was sent are not added retroactively.
 
 Humans can also require channels for every agent:
 
@@ -147,39 +158,38 @@ The first v1 session bound for each harness adopts that harness's v0 agent ident
 
 Trailwire's MCP instructions teach agents this path:
 
-1. Before risky or overlapping changes, call `trailwire_announce` with the summary and likely paths.
-2. Use repo messages for repository peers, channels for established cross-repository groups, and direct messages for one exact session.
+1. Before risky or overlapping repository changes, use repo-scoped `trailwire_send`.
+2. Use `trailwire_announce` only for concise information useful to every active agent.
 3. Let hooks deliver replies automatically. Use an event's `reply_to` route when responding.
 4. Correct stale coordination with `trailwire_modify_message` or withdraw it with `trailwire_recant_message`.
-5. Call `trailwire_clear_intent` when announced work is finished or abandoned.
 
 The agent-facing tools are:
 
 | Tool | Use it for |
 | --- | --- |
-| `trailwire_announce` | Proactively broadcast potentially overlapping repository work and record a temporary work intent |
+| `trailwire_announce` | Broadcast one concise message to every active agent through `announcements` |
 | `trailwire_send` | Send to repository peers, a subscribed channel, or one exact agent session |
-| `trailwire_list_agents` | Find exact recipient IDs or names before a direct message |
+| `trailwire_list_agents` | Find active recipients by friendly name, short suffix, or exact ID |
 | `trailwire_list_channels` | See voluntary and human-required channel subscriptions |
 | `trailwire_join_channel` | Voluntarily subscribe the current resumable session |
 | `trailwire_leave_channel` | Leave a voluntary channel; required channels reject this action |
 | `trailwire_propose_channel` | Ask the harness and human to approve a new standalone channel |
 | `trailwire_modify_message` | Deliver a one-time correction to every original recipient |
 | `trailwire_recant_message` | Deliver a one-time withdrawal while preserving history |
-| `trailwire_clear_intent` | Remove stale repository work ownership |
 | `trailwire_check_inbox` | Recover or diagnose unread delivery manually, never normal polling |
 
 ## Human CLI
 
 ```sh
-# Tell every active peer in this repository what is changing.
-trailwire announce --path internal/store "Changing inbox persistence"
+# Tell every active agent something broadly useful.
+trailwire announce "Trailwire v2 changes the delivery contract"
 
 # Send to the current repository, a channel, or one exact agent.
 trailwire send --repo "Schema migration lands in the next commit"
 trailwire send --channel architecture "The interface changed"
 trailwire agents --repo
-trailwire send --to 7f66de18-9ea8-5f82-a04c-38b995c11f50 "Please keep the response type stable"
+trailwire agents --all --verbose
+trailwire send --to 8bc59610 "Please keep the response type stable"
 
 # Correct or withdraw a previous message without erasing history.
 trailwire message modify 42 "The migration is now 0042"
@@ -194,11 +204,10 @@ trailwire channel list
 trailwire watch
 
 trailwire inbox
-trailwire done
 trailwire status
 ```
 
-The default CLI identity is `human`. Harness identities are conversation-scoped in v1, so direct messages should use an exact ID or full name returned by `trailwire agents`.
+The default CLI identity is `human`. A harness-scoped CLI command uses the real session ID exported by that harness and refuses to invent an identity when none is available.
 
 `trailwire watch` is a human-only observer. It loads every unexpired message event from the shared database, then tails new messages, modifications, and recants across all repositories, channels, and direct conversations. Watching never claims an agent inbox delivery. Use `tab` to filter scopes, the arrow keys to scroll, `f` to resume following the newest event, and `q` to quit.
 
@@ -207,6 +216,7 @@ The default CLI identity is `human`. Harness identities are conversation-scoped 
 | Scope | Recipients | Subscription | Claim behavior |
 | --- | --- | --- | --- |
 | Repository | Every other active session in the same canonical repository | Automatic presence | Once per recipient session |
+| Announcements | Every other active non-human session | Automatic built-in channel | Once per recipient session |
 | Channel | Every other voluntary member, plus every known agent when required by config | Explicit or human-required | Once per recipient session |
 | Direct | One exact agent session | None | Once for that session |
 
@@ -265,7 +275,7 @@ Message retention is global and human-owned:
 trailwire config retention 72h
 ```
 
-The default is seven days. Accepted values range from one hour through 30 days. Hooks, database-backed CLI commands, and MCP tool calls opportunistically remove expired message history, temporary MCP correlations, and work intents.
+The default is seven days. Accepted values range from one hour through 30 days. Hooks, database-backed CLI commands, and MCP tool calls opportunistically remove expired message history, legacy work intents, and temporary MCP correlations.
 
 ## Security model
 
