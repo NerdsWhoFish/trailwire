@@ -7,3 +7,4 @@
 | [0003](0003-enforce-mandatory-channels-as-delivery-policy.md) | Enforce mandatory channels as delivery policy | Mirror human-configured mandatory channels into SQLite and apply them during recipient resolution. |
 | [0004](0004-route-announcements-through-a-built-in-global-channel.md) | Route announcements through a built-in global channel | Make announcements repository-independent and deliver them once to every active agent through an automatic built-in channel. |
 | [0005](0005-name-agent-sessions-by-workspace.md) | Name agent sessions by workspace | Keep UUIDs and native session bindings internal while naming sessions from their workspace and accepting short suffixes for targeting. |
+| [0006](0006-coordinate-non-git-sessions-by-working-directory.md) | Coordinate non-Git sessions by working directory | Coordinate non-Git sessions by working directory |

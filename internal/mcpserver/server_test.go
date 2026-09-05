@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/theoutdoorprogrammer/trailwire/internal/hook"
 	"github.com/theoutdoorprogrammer/trailwire/internal/session"
 	"github.com/theoutdoorprogrammer/trailwire/internal/store"
 )
@@ -23,7 +25,7 @@ func TestMCPRoutesMessagesAndProposesChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	codex, err := session.Open(ctx, session.Options{ConfigPath: configPath, Harness: "codex", NativeSessionID: "codex-test", CWD: cwd, RequireRepo: true})
+	codex, err := session.Open(ctx, session.Options{ConfigPath: configPath, Harness: "codex", NativeSessionID: "codex-test", CWD: cwd})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +34,7 @@ func TestMCPRoutesMessagesAndProposesChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claude, err := session.Open(ctx, session.Options{ConfigPath: configPath, Harness: "claude", NativeSessionID: "claude-test", CWD: cwd, RequireRepo: true})
+	claude, err := session.Open(ctx, session.Options{ConfigPath: configPath, Harness: "claude", NativeSessionID: "claude-test", CWD: cwd})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +94,73 @@ func TestMCPRoutesMessagesAndProposesChannels(t *testing.T) {
 	}
 	if len(channels) != 2 || channels[0].Name != "announcements" || !channels[0].Forced || channels[1].Name != "architecture" || channels[1].Forced {
 		t.Fatalf("channels = %#v", channels)
+	}
+}
+
+func TestMCPRepoMessagesReachHooksOutsideGit(t *testing.T) {
+	ctx := context.Background()
+	temp := t.TempDir()
+	t.Setenv("TRAILWIRE_DATA_DIR", filepath.Join(temp, "data"))
+	configPath := filepath.Join(temp, "config.json")
+	workspace := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(workspace, alias); err != nil {
+		t.Fatal(err)
+	}
+	runHook := func(id, cwd string) string {
+		t.Helper()
+		input, err := json.Marshal(hook.Input{HookEventName: "PostToolUse", SessionID: id, CWD: cwd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var output bytes.Buffer
+		if err := hook.Run(ctx, hook.Options{
+			Harness: "codex", ConfigPath: configPath, Input: bytes.NewReader(input), Output: &output,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return output.String()
+	}
+	recipients := []struct{ id, cwd string }{
+		{"first", workspace}, {"second", alias}, {"unrelated", t.TempDir()},
+	}
+	for _, recipient := range recipients {
+		runHook(recipient.id, recipient.cwd)
+	}
+	sender, err := session.Open(ctx, session.Options{
+		ConfigPath: configPath, Harness: "claude", NativeSessionID: "sender", CWD: workspace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sender.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	server := New(sender, "test")
+	request := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Meta: mcp.Meta{"session_id": "sender"}}}
+	_, sent, err := server.send(ctx, request, SendInput{Scope: "repo", Body: "Changing the shared document"})
+	if err != nil || sent.Recipients != 2 {
+		t.Fatalf("send = %#v, %v; want two recipients", sent, err)
+	}
+	for i, recipient := range recipients {
+		output := runHook(recipient.id, recipient.cwd)
+		if strings.Contains(output, "Changing the shared document") != (i < 2) {
+			t.Fatalf("delivery to %s: %s", recipient.id, output)
+		}
+		if output := runHook(recipient.id, recipient.cwd); strings.Contains(output, "Changing the shared document") {
+			t.Fatalf("replayed to %s: %s", recipient.id, output)
+		}
+	}
+	_, changed, err := server.modifyMessage(ctx, request, MessageInput{MessageID: sent.MessageID, Body: "Changing only the introduction"})
+	if err != nil || changed.Recipients != 2 {
+		t.Fatalf("modify = %#v, %v", changed, err)
+	}
+	for i, recipient := range recipients {
+		if output := runHook(recipient.id, recipient.cwd); strings.Contains(output, "Changing only the introduction") != (i < 2) {
+			t.Fatalf("modification to %s: %s", recipient.id, output)
+		}
 	}
 }
 
@@ -177,7 +246,7 @@ func TestMCPBindsCursorCallFromPreToolHookContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	recipient, err := session.Open(ctx, session.Options{
-		ConfigPath: configPath, Harness: "claude", NativeSessionID: "claude-recipient", CWD: cwd, RequireRepo: true,
+		ConfigPath: configPath, Harness: "claude", NativeSessionID: "claude-recipient", CWD: cwd,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +255,7 @@ func TestMCPBindsCursorCallFromPreToolHookContext(t *testing.T) {
 	if err := recipient.Touch(ctx, "claude-recipient"); err != nil {
 		t.Fatal(err)
 	}
-	cursor, err := session.Open(ctx, session.Options{ConfigPath: configPath, Harness: "cursor", CWD: cwd, RequireRepo: true})
+	cursor, err := session.Open(ctx, session.Options{ConfigPath: configPath, Harness: "cursor", CWD: cwd})
 	if err != nil {
 		t.Fatal(err)
 	}

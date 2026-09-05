@@ -20,7 +20,7 @@ type Server struct {
 }
 
 type SendInput struct {
-	Scope  string `json:"scope" jsonschema:"delivery scope: repo for every other active session in this repository, channel for every other subscribed session, or agent for one direct recipient"`
+	Scope  string `json:"scope" jsonschema:"delivery scope: repo for every other active session in this repository or the same working directory outside Git, channel for every other subscribed session, or agent for one direct recipient"`
 	Target string `json:"target,omitempty" jsonschema:"channel name for channel scope, or exact agent id or full name for agent scope; omit for repo scope"`
 	Body   string `json:"body" jsonschema:"concise coordination information the recipients need to avoid conflicts or make progress"`
 }
@@ -123,7 +123,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name: "trailwire_send", Description: "Send useful coordination once to each eligible recipient. Use repo to reach every other active session in the current repository, channel to reach every other subscribed session, or agent with an exact id or full name for one direct recipient. When replying to an injected event, copy its reply_to scope and target exactly.",
+		Name: "trailwire_send", Description: "Send useful coordination once to each eligible recipient. Use repo to reach every other active session in the current repository or the same working directory outside Git, channel to reach every other subscribed session, or agent with an exact id or full name for one direct recipient. Git is optional; different non-Git directories coordinate separately. When replying to an injected event, copy its reply_to scope and target exactly.",
 	}, s.send)
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name: "trailwire_announce", Description: "Broadcast one concise announcement to every active agent through the built-in announcements channel. This works outside Git repositories and requires no subscription or channel configuration. Use repo-scoped trailwire_send instead for ordinary file overlap and repository work.",
@@ -247,7 +247,7 @@ func (s *Server) send(ctx context.Context, request *mcp.CallToolRequest, input S
 	switch sendRequest.TargetKind {
 	case "repo":
 		if s.session.Repository == nil {
-			return nil, DeliveryOutput{}, errors.New("the MCP server is not running inside a Git repository")
+			return nil, DeliveryOutput{}, errors.New("the MCP server has no working directory")
 		}
 		sendRequest.TargetID = s.session.Repository.ID
 	case "channel":

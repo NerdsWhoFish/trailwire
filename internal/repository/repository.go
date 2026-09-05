@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,7 @@ type Info struct {
 func Discover(cwd string) (Info, error) {
 	root, err := git(cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return Info{}, errors.New("current directory is not inside a Git repository")
+		return directory(cwd)
 	}
 	root, err = filepath.Abs(root)
 	if err != nil {
@@ -41,6 +42,30 @@ func Discover(cwd string) (Info, error) {
 	digest := sha256.Sum256([]byte(filepath.Clean(commonDir)))
 	return Info{
 		ID:      "local:" + hex.EncodeToString(digest[:12]),
+		Display: filepath.Base(root),
+		Root:    root,
+	}, nil
+}
+
+func directory(cwd string) (Info, error) {
+	root, err := filepath.Abs(cwd)
+	if err != nil {
+		return Info{}, fmt.Errorf("resolve workspace directory: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return Info{}, fmt.Errorf("resolve workspace directory: %w", err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return Info{}, fmt.Errorf("stat workspace directory: %w", err)
+	}
+	if !info.IsDir() {
+		return Info{}, errors.New("workspace path is not a directory")
+	}
+	digest := sha256.Sum256([]byte(root))
+	return Info{
+		ID:      "directory:" + hex.EncodeToString(digest[:12]),
 		Display: filepath.Base(root),
 		Root:    root,
 	}, nil
