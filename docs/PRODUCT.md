@@ -30,6 +30,8 @@ Trailwire lets local AI coding sessions coordinate across Claude Code, Codex, an
 - Repository presence automatically participates in that repository's coordination stream. It is not a named channel and requires no join action.
 - A repository broadcast resolves every other active session in the same canonical repository.
 - Repository identity comes from a normalized `origin` remote. A repository without an origin uses a hash of its Git common directory.
+- Git is optional. When Git discovery is unavailable, the repo scope uses a separately prefixed hash of the absolute, symlink-resolved working directory across hooks, MCP, and CLI commands.
+- Non-Git directory aliases share a scope; distinct directories, including parents and children, remain isolated. Missing paths and files are rejected.
 - Presence expires after 24 hours without activity. A clean session end removes it immediately.
 - Likely repository overlap is coordinated through repository messages.
 

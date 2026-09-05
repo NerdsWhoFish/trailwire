@@ -8,7 +8,7 @@ Agents broadcast repository changes, send global announcements, use cross-reposi
 
 Running several agents in one repository is useful until two of them edit the same migration, change opposite sides of an interface, or independently regenerate the same output. Trailwire gives each resumable conversation its own delivery identity and a lightweight way to say, "I may affect your work."
 
-- Repository coordination is automatic. Sessions working in the same canonical Git repository are included without setup.
+- Local coordination is automatic. Sessions working in the same canonical Git repository, or the same directory outside Git, are included without setup.
 - The built-in `announcements` channel reaches every active agent without setup or a Git repository.
 - Delivery is once per recipient. One session reading an event never prevents another recipient from seeing it.
 - Named channels can span repositories and may be voluntary or required by human configuration.
@@ -90,6 +90,8 @@ An agent replying to that event uses the `reply_to` values with `trailwire_send`
 ## Repository coordination
 
 Every session working in a Git repository automatically participates in that repository's built-in coordination stream. Trailwire identifies the repository from its normalized `origin` remote. A repository without an origin uses a hash of its Git common directory, so linked worktrees still coordinate.
+
+Git is optional. Outside a Git repository, the same `repo` scope uses a hash of the absolute, symlink-resolved working directory. Sessions in that directory coordinate automatically through hooks, MCP, and `trailwire send --repo`; `trailwire agents --repo` lists them. Different directories, including parent and child directories, remain separate. Use a named channel to coordinate across them. Moving a directory or initializing Git changes its coordination identity.
 
 The repository stream behaves like an automatic repo-specific channel, but it is not a named channel and requires no join step:
 

@@ -184,7 +184,7 @@ func sendCommand() *cli.Command {
 		Usage:     "Send a repository, channel, or direct message",
 		ArgsUsage: "MESSAGE",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{Name: "repo", Usage: "send to agents active in this repository"},
+			&cli.BoolFlag{Name: "repo", Usage: "send to agents active in this repository or working directory"},
 			&cli.StringFlag{Name: "channel", Aliases: []string{"c"}, Usage: "send to a named channel"},
 			&cli.StringFlag{Name: "to", Aliases: []string{"t"}, Usage: "send directly to an agent id, name, or harness"},
 		},
@@ -207,7 +207,7 @@ func sendCommand() *cli.Command {
 				return errors.New("choose exactly one of --repo, --channel, or --to")
 			}
 
-			s, err := openSession(ctx, cmd, cmd.Bool("repo"))
+			s, err := openSession(ctx, cmd)
 			if err != nil {
 				return err
 			}
@@ -249,7 +249,7 @@ func announceCommand() *cli.Command {
 			if body == "" {
 				return errors.New("message is required")
 			}
-			s, err := openSession(ctx, cmd, false)
+			s, err := openSession(ctx, cmd)
 			if err != nil {
 				return err
 			}
@@ -274,7 +274,7 @@ func inboxCommand() *cli.Command {
 		Name:  "inbox",
 		Usage: "Claim and print unread messages",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			s, err := openSession(ctx, cmd, false)
+			s, err := openSession(ctx, cmd)
 			if err != nil {
 				return err
 			}
@@ -309,7 +309,7 @@ func watchCommand() *cli.Command {
 			if !strings.EqualFold(cmd.String("harness"), "human") {
 				return errors.New("watch is human-only; use the default human harness")
 			}
-			s, err := openSession(ctx, cmd, false)
+			s, err := openSession(ctx, cmd)
 			if err != nil {
 				return err
 			}
@@ -332,12 +332,12 @@ func agentsCommand() *cli.Command {
 		Name:  "agents",
 		Usage: "List active agents",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{Name: "repo", Usage: "only agents seen in this repository"},
+			&cli.BoolFlag{Name: "repo", Usage: "only agents seen in this repository or working directory"},
 			&cli.BoolFlag{Name: "all", Usage: "include inactive historical agents"},
 			&cli.BoolFlag{Name: "verbose", Usage: "show full agent UUIDs"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			s, err := openSession(ctx, cmd, cmd.Bool("repo"))
+			s, err := openSession(ctx, cmd)
 			if err != nil {
 				return err
 			}
@@ -373,7 +373,7 @@ func channelCommand() *cli.Command {
 					if cmd.Args().Len() != 1 {
 						return errors.New("channel name is required")
 					}
-					s, err := openSession(ctx, cmd, false)
+					s, err := openSession(ctx, cmd)
 					if err != nil {
 						return err
 					}
@@ -395,7 +395,7 @@ func channelCommand() *cli.Command {
 					if cmd.Args().Len() != 1 {
 						return errors.New("channel name is required")
 					}
-					s, err := openSession(ctx, cmd, false)
+					s, err := openSession(ctx, cmd)
 					if err != nil {
 						return err
 					}
@@ -413,7 +413,7 @@ func channelCommand() *cli.Command {
 					if cmd.Args().Len() != 1 {
 						return errors.New("channel name is required")
 					}
-					s, err := openSession(ctx, cmd, false)
+					s, err := openSession(ctx, cmd)
 					if err != nil {
 						return err
 					}
@@ -424,7 +424,7 @@ func channelCommand() *cli.Command {
 			{
 				Name: "list",
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					s, err := openSession(ctx, cmd, false)
+					s, err := openSession(ctx, cmd)
 					if err != nil {
 						return err
 					}
@@ -555,7 +555,7 @@ func openHumanConfigSession(ctx context.Context, cmd *cli.Command) (*session.Ses
 	if !strings.EqualFold(cmd.String("harness"), "human") {
 		return nil, errors.New("mandatory channel policy is human-owned; use the default human harness")
 	}
-	return openSession(ctx, cmd, false)
+	return openSession(ctx, cmd)
 }
 
 func messageCommand() *cli.Command {
@@ -573,7 +573,7 @@ func messageCommand() *cli.Command {
 					if err != nil {
 						return fmt.Errorf("invalid message id: %w", err)
 					}
-					s, err := openSession(ctx, cmd, false)
+					s, err := openSession(ctx, cmd)
 					if err != nil {
 						return err
 					}
@@ -600,7 +600,7 @@ func messageCommand() *cli.Command {
 					if cmd.Args().Len() > 1 {
 						reason = strings.Join(cmd.Args().Slice()[1:], " ")
 					}
-					s, err := openSession(ctx, cmd, false)
+					s, err := openSession(ctx, cmd)
 					if err != nil {
 						return err
 					}
@@ -632,7 +632,7 @@ func configCommand() *cli.Command {
 					if err != nil {
 						return fmt.Errorf("invalid retention duration: %w", err)
 					}
-					s, err := openSession(ctx, cmd, false)
+					s, err := openSession(ctx, cmd)
 					if err != nil {
 						return err
 					}
@@ -657,7 +657,7 @@ func statusCommand() *cli.Command {
 		Name:  "status",
 		Usage: "Show local Trailwire identity and storage",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			s, err := openSession(ctx, cmd, false)
+			s, err := openSession(ctx, cmd)
 			if err != nil {
 				return err
 			}
@@ -675,14 +675,14 @@ func statusCommand() *cli.Command {
 	}
 }
 
-func openSession(ctx context.Context, cmd *cli.Command, requireRepo bool) (*session.Session, error) {
+func openSession(ctx context.Context, cmd *cli.Command) (*session.Session, error) {
 	harness := strings.ToLower(strings.TrimSpace(cmd.String("harness")))
 	nativeSessionID, err := cliNativeSessionID(harness)
 	if err != nil {
 		return nil, err
 	}
 	return session.Open(ctx, session.Options{
-		ConfigPath: cmd.String("config"), Harness: harness, NativeSessionID: nativeSessionID, RequireRepo: requireRepo,
+		ConfigPath: cmd.String("config"), Harness: harness, NativeSessionID: nativeSessionID,
 	})
 }
 

@@ -168,7 +168,7 @@ func hookTestEnvironment(t *testing.T) (string, string) {
 func openHookTestSession(t *testing.T, ctx context.Context, configPath, harness, cwd string) *session.Session {
 	t.Helper()
 	active, err := session.Open(ctx, session.Options{
-		ConfigPath: configPath, Harness: harness, NativeSessionID: harness + "-session", CWD: cwd, RequireRepo: true,
+		ConfigPath: configPath, Harness: harness, NativeSessionID: harness + "-session", CWD: cwd,
 	})
 	if err != nil {
 		t.Fatal(err)

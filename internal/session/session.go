@@ -31,7 +31,6 @@ type Options struct {
 	Harness         string
 	NativeSessionID string
 	CWD             string
-	RequireRepo     bool
 }
 
 func Open(ctx context.Context, options Options) (*Session, error) {
@@ -99,12 +98,11 @@ func Open(ctx context.Context, options Options) (*Session, error) {
 		}
 	}
 	repo, repoErr := repository.Discover(cwd)
-	if repoErr == nil {
-		result.Repository = &repo
-	} else if options.RequireRepo {
+	if repoErr != nil {
 		result.Close()
 		return nil, repoErr
 	}
+	result.Repository = &repo
 	result.Workspace = workspaceName(cwd)
 	if harness == "human" {
 		result.Agent = agent
