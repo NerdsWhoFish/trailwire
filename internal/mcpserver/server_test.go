@@ -55,8 +55,9 @@ func TestMCPRoutesMessagesAndProposesChannels(t *testing.T) {
 	}
 	defer clientSession.Close()
 
+	const body = "I am changing the \"command API\"\nKeeping Unicode: 🦉"
 	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
-		Name: "trailwire_send", Arguments: map[string]any{"scope": "repo", "body": "I am changing the command API"},
+		Name: "trailwire_send", Arguments: map[string]any{"scope": "repo", "body": " \t" + body + "\n "},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -68,9 +69,10 @@ func TestMCPRoutesMessagesAndProposesChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Body != "I am changing the command API" {
+	if len(events) != 1 || events[0].Body != body {
 		t.Fatalf("events = %#v", events)
 	}
+	assertDeliveryOutput(t, result, DeliveryOutput{MessageID: events[0].ID, Recipients: 1, Body: events[0].Body})
 	second, err := codex.Store.ClaimInbox(ctx, codex.Agent.ID, 50)
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +207,7 @@ func TestMCPAnnounceWorksOutsideGitRepository(t *testing.T) {
 	defer clientSession.Close()
 
 	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
-		Name: "trailwire_announce", Arguments: map[string]any{"summary": "Release 2 changes the delivery contract"},
+		Name: "trailwire_announce", Arguments: map[string]any{"summary": " \tRelease 2 changes the delivery contract\n "},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +221,31 @@ func TestMCPAnnounceWorksOutsideGitRepository(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Body != "Release 2 changes the delivery contract" || events[0].TargetKind != "channel" || events[0].TargetID != store.AnnouncementsChannel {
 		t.Fatalf("announcement events = %#v", events)
+	}
+	assertDeliveryOutput(t, result, DeliveryOutput{MessageID: events[0].ID, Recipients: 1, Body: events[0].Body})
+}
+
+func assertDeliveryOutput(t *testing.T, result *mcp.CallToolResult, want DeliveryOutput) {
+	t.Helper()
+	structured, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("content = %#v; want one JSON text response", result.Content)
+	}
+	content, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content type = %T; want text", result.Content[0])
+	}
+	for name, data := range map[string][]byte{"structured": structured, "text": []byte(content.Text)} {
+		var got DeliveryOutput
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("%s output: %v", name, err)
+		}
+		if got != want {
+			t.Errorf("%s output = %#v; want %#v", name, got, want)
+		}
 	}
 }
 
