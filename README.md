@@ -87,6 +87,16 @@ An agent replying to that event uses the `reply_to` values with `trailwire_send`
 
 `trailwire_check_inbox` exists for manual recovery and diagnostics. Agents should not poll it during normal work.
 
+`trailwire_send` and `trailwire_announce` return the message ID, recipient count, and sent text in both their structured output and JSON text response. The `body` matches the delivered message, with surrounding whitespace trimmed:
+
+```json
+{
+  "message_id": 42,
+  "recipients": 2,
+  "body": "The shared response type is changing."
+}
+```
+
 ## Repository coordination
 
 Every session working in a Git repository automatically participates in that repository's built-in coordination stream. Trailwire identifies the repository from its normalized `origin` remote. A repository without an origin uses a hash of its Git common directory, so linked worktrees still coordinate.

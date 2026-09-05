@@ -46,8 +46,9 @@ type ChannelInput struct {
 type EmptyInput struct{}
 
 type DeliveryOutput struct {
-	MessageID  int64 `json:"message_id"`
-	Recipients int   `json:"recipients"`
+	MessageID  int64  `json:"message_id"`
+	Recipients int    `json:"recipients"`
+	Body       string `json:"body" jsonschema:"sent message text after trimming surrounding whitespace"`
 }
 
 type CountOutput struct {
@@ -262,7 +263,7 @@ func (s *Server) send(ctx context.Context, request *mcp.CallToolRequest, input S
 		return nil, DeliveryOutput{}, errors.New("scope must be repo, channel, or agent")
 	}
 	messageID, recipients, err := s.session.Store.Send(ctx, sendRequest)
-	return nil, DeliveryOutput{MessageID: messageID, Recipients: recipients}, err
+	return nil, DeliveryOutput{MessageID: messageID, Recipients: recipients, Body: strings.TrimSpace(input.Body)}, err
 }
 
 func (s *Server) announce(ctx context.Context, request *mcp.CallToolRequest, input AnnounceInput) (*mcp.CallToolResult, DeliveryOutput, error) {
@@ -273,7 +274,7 @@ func (s *Server) announce(ctx context.Context, request *mcp.CallToolRequest, inp
 	messageID, recipients, err := s.session.Store.Send(ctx, store.SendRequest{
 		SenderID: agent.ID, TargetKind: "channel", TargetID: store.AnnouncementsChannel, Body: input.Summary,
 	})
-	return nil, DeliveryOutput{MessageID: messageID, Recipients: recipients}, err
+	return nil, DeliveryOutput{MessageID: messageID, Recipients: recipients, Body: strings.TrimSpace(input.Summary)}, err
 }
 
 func (s *Server) modifyMessage(ctx context.Context, request *mcp.CallToolRequest, input MessageInput) (*mcp.CallToolResult, CountOutput, error) {
