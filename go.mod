@@ -1,19 +1,19 @@
 module github.com/theoutdoorprogrammer/trailwire
 
-go 1.25.0
+go 1.26.0
 
 require (
 	charm.land/bubbles/v2 v2.2.1
-	charm.land/bubbletea/v2 v2.0.9
+	charm.land/bubbletea/v2 v2.0.10
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/charmbracelet/x/ansi v0.11.8
-	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/urfave/cli/v3 v3.11.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/urfave/cli/v3 v3.13.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
-	modernc.org/sqlite v1.57.0
+	modernc.org/sqlite v1.59.0
 )
 
 require (
@@ -57,7 +57,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/grpc v1.83.1 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
-	modernc.org/libc v1.74.4 // indirect
+	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.11.0 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )
